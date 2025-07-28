@@ -1,9 +1,8 @@
 import dotenv from 'dotenv';
+dotenv.config();
 import { writeFileSync } from 'fs';
 import VkBot from 'node-vk-bot-api';
 import PQueue from 'p-queue';
-
-dotenv.config();
 
 const TOKEN = process.env.VK_TOKEN;
 const GROUP_ID = process.env.VK_GROUP_ID;
@@ -21,11 +20,15 @@ function isAdmin(userId) {
   return ADMIN_IDS.includes(userId);
 }
 
+function generateRandomId(peer_id) {
+  return peer_id * 100000 + (Date.now() % 100000);
+}
+
 async function sendMessage(peer_id, text) {
   return bot.api('messages.send', {
     peer_id,
     message: text,
-    random_id: Math.floor(Math.random() * 1e9),
+    random_id: generateRandomId(peer_id),
   });
 }
 
