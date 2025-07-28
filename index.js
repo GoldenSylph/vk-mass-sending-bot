@@ -1,8 +1,9 @@
-// vk_mass_messaging_bot.js
-require('dotenv').config();
-const fs = require('fs');
-const VkBot = require('node-vk-bot-api');
-const PQueue = require('p-queue');
+import dotenv from 'dotenv';
+import { writeFileSync } from 'fs';
+import VkBot from 'node-vk-bot-api';
+import PQueue from 'p-queue';
+
+dotenv.config();
 
 const TOKEN = process.env.VK_TOKEN;
 const GROUP_ID = process.env.VK_GROUP_ID;
@@ -49,7 +50,7 @@ async function gatherUserIds(group_id) {
     if (offset >= total) break;
   }
 
-  fs.writeFileSync('./peer_list.json', JSON.stringify(members, null, 2));
+  writeFileSync('./peer_list.json', JSON.stringify(members, null, 2));
   return members;
 }
 

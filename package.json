@@ -1,0 +1,16 @@
+{
+  "name": "vk-mass-sending-bot",
+  "packageManager": "yarn@4.9.2",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.1",
+    "node-vk-bot-api": "^3.5.0",
+    "p-queue": "^8.1.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
