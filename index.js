@@ -26,9 +26,11 @@ function generateRandomId(peer_id) {
 }
 
 async function sendMessage(peer_id, text) {
+  const attachmentIds = (process.env.ATTACHMENTS || '').trim();
   return bot.api('messages.send', {
     peer_id,
     message: text,
+    attachment: attachmentIds || undefined,
     random_id: generateRandomId(peer_id),
   });
 }
