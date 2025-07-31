@@ -1,9 +1,8 @@
-import dotenv from 'dotenv';
-dotenv.config();
-import fs from 'fs';
-import VkBot from 'node-vk-bot-api';
-import PQueue from 'p-queue';
-import Handlebars from 'handlebars';
+require('dotenv').config();
+const fs = require('fs');
+const VkBot = require('node-vk-bot-api');
+const PQueue = require('p-queue');
+const Handlebars = require('handlebars');
 
 const TOKEN = process.env.VK_TOKEN;
 const GROUP_ID = process.env.VK_GROUP_ID;
@@ -33,6 +32,12 @@ const bot = new VkBot({
 
 const queue = new PQueue({ intervalCap: 30, interval: 1000 });
 
+// Cache for blocklist and allowlist to reduce file I/O
+let blocklistCache = null;
+let allowlistCache = null;
+let blocklistLastModified = 0;
+let allowlistLastModified = 0;
+
 function isAdmin(userId) {
   return ADMIN_IDS.includes(userId);
 }
@@ -44,20 +49,33 @@ function isValidUserId(userId) {
 
 function loadBlocklist() {
   try {
+    const stats = fs.statSync('./blocklist.json');
+    const lastModified = stats.mtime.getTime();
+    
+    if (blocklistCache && blocklistLastModified >= lastModified) {
+      return blocklistCache;
+    }
+    
     const data = fs.readFileSync('./blocklist.json', 'utf-8');
     const parsed = JSON.parse(data);
-    return Array.isArray(parsed) ? parsed : [];
+    blocklistCache = Array.isArray(parsed) ? parsed : [];
+    blocklistLastModified = lastModified;
+    return blocklistCache;
   } catch (err) {
     if (err.code !== 'ENOENT') {
       console.error('Error loading blocklist:', err.message);
     }
-    return [];
+    blocklistCache = [];
+    blocklistLastModified = 0;
+    return blocklistCache;
   }
 }
 
 function saveBlocklist(blocklist) {
   try {
     fs.writeFileSync('./blocklist.json', JSON.stringify(blocklist, null, 2));
+    blocklistCache = blocklist;
+    blocklistLastModified = Date.now();
   } catch (err) {
     console.error('Error saving blocklist:', err.message);
     throw new Error('Failed to save blocklist');
@@ -72,7 +90,6 @@ function addToBlocklist(userId) {
   const blocklist = loadBlocklist();
   const userIdStr = String(userId);
   
-  // Check if already exists
   if (!blocklist.includes(userIdStr)) {
     blocklist.push(userIdStr);
     saveBlocklist(blocklist);
@@ -95,31 +112,35 @@ function removeFromBlocklist(userId) {
   return false;
 }
 
-function isBlocked(userId) {
-  const blocklist = loadBlocklist();
-  return blocklist.includes(String(userId));
-}
-
-function filterBlockedUsers(users) {
-  return users.filter(user => !isBlocked(user.id));
-}
-
 function loadAllowlist() {
   try {
+    const stats = fs.statSync('./allowlist.json');
+    const lastModified = stats.mtime.getTime();
+    
+    if (allowlistCache && allowlistLastModified >= lastModified) {
+      return allowlistCache;
+    }
+    
     const data = fs.readFileSync('./allowlist.json', 'utf-8');
     const parsed = JSON.parse(data);
-    return Array.isArray(parsed) ? parsed : [];
+    allowlistCache = Array.isArray(parsed) ? parsed : [];
+    allowlistLastModified = lastModified;
+    return allowlistCache;
   } catch (err) {
     if (err.code !== 'ENOENT') {
       console.error('Error loading allowlist:', err.message);
     }
-    return [];
+    allowlistCache = [];
+    allowlistLastModified = 0;
+    return allowlistCache;
   }
 }
 
 function saveAllowlist(allowlist) {
   try {
     fs.writeFileSync('./allowlist.json', JSON.stringify(allowlist, null, 2));
+    allowlistCache = allowlist;
+    allowlistLastModified = Date.now();
   } catch (err) {
     console.error('Error saving allowlist:', err.message);
     throw new Error('Failed to save allowlist');
@@ -134,7 +155,6 @@ function addToAllowlist(userId) {
   const allowlist = loadAllowlist();
   const userIdStr = String(userId);
   
-  // Check if already exists
   if (!allowlist.includes(userIdStr)) {
     allowlist.push(userIdStr);
     saveAllowlist(allowlist);
@@ -157,21 +177,23 @@ function removeFromAllowlist(userId) {
   return false;
 }
 
-function isAllowed(userId) {
-  const allowlist = loadAllowlist();
-  return allowlist.includes(String(userId));
-}
-
 function filterUsers(users) {
   const allowlist = loadAllowlist();
+  const blocklist = loadBlocklist();
+  const allowlistSet = new Set(allowlist);
+  const blocklistSet = new Set(blocklist);
   
-  // If allowlist has entries, only include users in allowlist
-  if (allowlist.length > 0) {
-    users = users.filter(user => isAllowed(user.id));
-  }
-  
-  // Then filter out blocked users
-  return users.filter(user => !isBlocked(user.id));
+  return users.filter(user => {
+    const userIdStr = String(user.id);
+    
+    // If allowlist has entries, only include users in allowlist
+    if (allowlist.length > 0 && !allowlistSet.has(userIdStr)) {
+      return false;
+    }
+    
+    // Filter out blocked users
+    return !blocklistSet.has(userIdStr);
+  });
 }
 
 function generateRandomId(peer_id) {
@@ -208,10 +230,12 @@ async function gatherUserIds(group_id) {
       members.push(...data.items);
       offset += count;
 
+      console.log(`📊 Gathered ${members.length}/${total} members...`);
+
       if (offset >= total) break;
     }
 
-    fs.writeFileSync('./peer_list.json', JSON.stringify(members, null, 4));
+    await fs.promises.writeFile('./peer_list.json', JSON.stringify(members, null, 4));
     return members;
   } catch (err) {
     console.error('Error gathering user IDs:', err);
@@ -233,7 +257,10 @@ async function broadcast(messageTemplate, userObjects, dryRun = false) {
       const allowlistActive = allowlist.length > 0;
       
       if (allowlistActive) {
-        const allowedUsers = userObjects.filter(user => isAllowed(user.id));
+        const allowedUsers = userObjects.filter(user => {
+          const allowlist = loadAllowlist();
+          return allowlist.includes(String(user.id));
+        });
         const notAllowedCount = originalCount - allowedUsers.length;
         const blockedFromAllowedCount = allowedUsers.length - filteredUsers.length;
         
@@ -246,6 +273,9 @@ async function broadcast(messageTemplate, userObjects, dryRun = false) {
       }
     }
 
+    let processed = 0;
+    const total = filteredUsers.length;
+
     for (const user of filteredUsers) {
       const personalizedMessage = template({
         first_name: user.first_name || '',
@@ -253,18 +283,26 @@ async function broadcast(messageTemplate, userObjects, dryRun = false) {
         id: user.id,
       });
 
-      queue.add(() => {
-        if (dryRun) {
-          console.log(`[DRY RUN] Would send to ${user.id}: "${personalizedMessage}"`);
-          return Promise.resolve();
-        }
-        return sendMessage(user.id, personalizedMessage).catch(async err => {
+      queue.add(async () => {
+        try {
+          if (dryRun) {
+            console.log(`[DRY RUN] Would send to ${user.id}: "${personalizedMessage}"`);
+          } else {
+            await sendMessage(user.id, personalizedMessage);
+          }
+          processed++;
+          if (processed % 10 === 0 || processed === total) {
+            console.log(`📤 Progress: ${processed}/${total} messages ${dryRun ? 'simulated' : 'sent'}`);
+          }
+        } catch (err) {
           console.error(`Error sending to ${user.id}:`, err);
           if (err.code === 429 && err.data?.parameters?.retry_after) {
             await new Promise(r => setTimeout(r, err.data.parameters.retry_after * 1000));
-            return sendMessage(user.id, personalizedMessage);
+            if (!dryRun) {
+              return sendMessage(user.id, personalizedMessage);
+            }
           }
-        });
+        }
       });
     }
     await queue.onIdle();
@@ -313,7 +351,10 @@ bot.command('/broadcast', async ctx => {
 
     let statusMessage = '';
     if (allowlistActive) {
-      const allowedUsers = users.filter(user => isAllowed(user.id));
+      const allowedUsers = users.filter(user => {
+        const allowlist = loadAllowlist();
+        return allowlist.includes(String(user.id));
+      });
       const notAllowedCount = users.length - allowedUsers.length;
       const blockedFromAllowedCount = allowedUsers.length - filteredUsers.length;
       
@@ -359,7 +400,10 @@ bot.command('/test_broadcast', async ctx => {
     if (!templateContent) return ctx.reply('❗ Template file is empty.');
 
     if (allowlistActive) {
-      const allowedUsers = users.filter(user => isAllowed(user.id));
+      const allowedUsers = users.filter(user => {
+        const allowlist = loadAllowlist();
+        return allowlist.includes(String(user.id));
+      });
       const blockedFromAllowedCount = allowedUsers.length - filteredUsers.length;
       ctx.reply(`🔍 Testing with ${filteredUsers.length} users (allowlist: ${allowedUsers.length}, blocked: ${blockedFromAllowedCount})`);
     } else {
