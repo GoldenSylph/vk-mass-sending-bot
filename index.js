@@ -1,8 +1,9 @@
-require('dotenv').config();
-const fs = require('fs');
-const VkBot = require('node-vk-bot-api');
-const PQueue = require('p-queue');
-const Handlebars = require('handlebars');
+import dotenv from 'dotenv';
+dotenv.config();
+import { statSync, readFileSync, writeFileSync, promises } from 'fs';
+import VkBot from 'node-vk-bot-api';
+import PQueue from 'p-queue';
+import Handlebars from 'handlebars';
 
 const TOKEN = process.env.VK_TOKEN;
 const GROUP_ID = process.env.VK_GROUP_ID;
@@ -49,14 +50,14 @@ function isValidUserId(userId) {
 
 function loadBlocklist() {
   try {
-    const stats = fs.statSync('./blocklist.json');
+    const stats = statSync('./blocklist.json');
     const lastModified = stats.mtime.getTime();
     
     if (blocklistCache && blocklistLastModified >= lastModified) {
       return blocklistCache;
     }
     
-    const data = fs.readFileSync('./blocklist.json', 'utf-8');
+    const data = readFileSync('./blocklist.json', 'utf-8');
     const parsed = JSON.parse(data);
     blocklistCache = Array.isArray(parsed) ? parsed : [];
     blocklistLastModified = lastModified;
@@ -73,7 +74,7 @@ function loadBlocklist() {
 
 function saveBlocklist(blocklist) {
   try {
-    fs.writeFileSync('./blocklist.json', JSON.stringify(blocklist, null, 2));
+    writeFileSync('./blocklist.json', JSON.stringify(blocklist, null, 2));
     blocklistCache = blocklist;
     blocklistLastModified = Date.now();
   } catch (err) {
@@ -114,14 +115,14 @@ function removeFromBlocklist(userId) {
 
 function loadAllowlist() {
   try {
-    const stats = fs.statSync('./allowlist.json');
+    const stats = statSync('./allowlist.json');
     const lastModified = stats.mtime.getTime();
     
     if (allowlistCache && allowlistLastModified >= lastModified) {
       return allowlistCache;
     }
     
-    const data = fs.readFileSync('./allowlist.json', 'utf-8');
+    const data = readFileSync('./allowlist.json', 'utf-8');
     const parsed = JSON.parse(data);
     allowlistCache = Array.isArray(parsed) ? parsed : [];
     allowlistLastModified = lastModified;
@@ -138,7 +139,7 @@ function loadAllowlist() {
 
 function saveAllowlist(allowlist) {
   try {
-    fs.writeFileSync('./allowlist.json', JSON.stringify(allowlist, null, 2));
+    writeFileSync('./allowlist.json', JSON.stringify(allowlist, null, 2));
     allowlistCache = allowlist;
     allowlistLastModified = Date.now();
   } catch (err) {
@@ -235,7 +236,7 @@ async function gatherUserIds(group_id) {
       if (offset >= total) break;
     }
 
-    await fs.promises.writeFile('./peer_list.json', JSON.stringify(members, null, 4));
+    await promises.writeFile('./peer_list.json', JSON.stringify(members, null, 4));
     return members;
   } catch (err) {
     console.error('Error gathering user IDs:', err);
@@ -342,7 +343,7 @@ bot.command('/broadcast', async ctx => {
     
     let templateContent;
     try {
-      templateContent = fs.readFileSync('./broadcast_template.txt', 'utf-8').trim();
+      templateContent = readFileSync('./broadcast_template.txt', 'utf-8').trim();
     } catch (err) {
       return ctx.reply('❗ Could not read broadcast_template.txt file.');
     }
@@ -392,7 +393,7 @@ bot.command('/test_broadcast', async ctx => {
     
     let templateContent;
     try {
-      templateContent = fs.readFileSync('./broadcast_template.txt', 'utf-8').trim();
+      templateContent = readFileSync('./broadcast_template.txt', 'utf-8').trim();
     } catch (err) {
       return ctx.reply('❗ Could not read broadcast_template.txt file.');
     }
@@ -567,4 +568,5 @@ bot.command('/clear_allowlist', async ctx => {
   ctx.reply('🗑️ Allowlist cleared (all users now allowed except blocked ones).');
 });
 
+console.log('🔗 Bot has been started...');
 bot.startPolling();

@@ -1,6 +1,9 @@
 {
   "name": "vk-mass-sending-bot",
   "packageManager": "yarn@4.9.2",
+  "type": "module",
+  "version": "1.0.0",
+  "description": "A bot for mass sending messages on VK using the VK API.",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js"
