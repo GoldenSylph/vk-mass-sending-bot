@@ -1,10 +1,15 @@
 import dotenv from 'dotenv';
+import express from 'express';
+import bodyParser from 'body-parser';
 dotenv.config();
 import { statSync, readFileSync, writeFileSync, promises } from 'fs';
 import VkBot from 'node-vk-bot-api';
 import PQueue from 'p-queue';
 import Handlebars from 'handlebars';
 
+const SECRET = process.env.SECRET;
+const CONFIRMATION = process.env.CONFIRMATION;
+const PORT = process.env.PORT || 3000;
 const TOKEN = process.env.VK_TOKEN;
 const GROUP_ID = process.env.VK_GROUP_ID;
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(Number);
@@ -28,7 +33,9 @@ if (ADMIN_IDS.length === 0 || ADMIN_IDS.every(id => isNaN(id))) {
 const bot = new VkBot({
   token: TOKEN,
   group_id: Number(GROUP_ID),
-  api: { v: '5.131' },
+  api: { v: '5.199' },
+  confirmation: CONFIRMATION,
+  secret: SECRET, 
 });
 
 const queue = new PQueue({ intervalCap: 30, interval: 1000 });
@@ -824,4 +831,7 @@ bot.command('/clear_allowlist', async ctx => {
 });
 
 console.log('🔗 Бот запущен...');
-bot.startPolling();
+const app = express();
+app.use(bodyParser.json());
+app.post('/', bot.webhookCallback);
+app.listen(PORT);
