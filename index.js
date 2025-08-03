@@ -38,6 +38,15 @@ const bot = new VkBot({
   secret: SECRET, 
 });
 
+// Add global error handling middleware
+bot.use(async (ctx, next) => {
+  try {
+    await next();
+  } catch (err) {
+    console.error('Bot middleware error:', err);
+  }
+});
+
 const queue = new PQueue({ intervalCap: 30, interval: 1000 });
 
 // Cache for blocklist and allowlist to reduce file I/O
@@ -834,4 +843,12 @@ console.log('🔗 Бот запущен...');
 const app = express();
 app.use(bodyParser.json());
 app.post('/', bot.webhookCallback);
+
+// Add polling error handling
+bot.startPolling((err) => {
+  if (err) {
+    console.error('Polling error:', err);
+  }
+});
+
 app.listen(PORT);
