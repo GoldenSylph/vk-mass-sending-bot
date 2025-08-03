@@ -9,7 +9,7 @@ import Handlebars from 'handlebars';
 
 const SECRET = process.env.SECRET;
 const CONFIRMATION = process.env.CONFIRMATION;
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 const TOKEN = process.env.VK_TOKEN;
 const GROUP_ID = process.env.VK_GROUP_ID;
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(Number);
