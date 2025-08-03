@@ -225,7 +225,7 @@ async function sendBroadcast(messageTemplate, userObjects, dryRun = false) {
         }
 
         if (dryRun) {
-          console.log(`[DRY RUN] Отправка ${user.id}: "${personalizedMessage.slice(0, 30)}...\n${user}\n[DRY RUN]"`);
+          console.log(`[DRY RUN] Отправка ${user.id}: "${personalizedMessage.slice(0, 30)}..."\n${JSON.stringify(user, null, 2)}\n[DRY RUN]`);
         } else {
           await sendMessage(user.id, personalizedMessage);
         }
