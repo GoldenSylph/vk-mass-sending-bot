@@ -108,10 +108,10 @@ const filterUsers = users => {
   });
 };
 
-const sendMessage = async (peer_id, text, keyboard, includeAttachments = false) => vkApi('messages.send', {
+const sendMessage = async (peer_id, text, keyboard, notIncludeAttachments = false) => vkApi('messages.send', {
   peer_id, 
   message: text, 
-  attachment: (includeAttachments && (process.env.ATTACHMENTS || '').trim()) || undefined,
+  attachment: !notIncludeAttachments ? process.env.ATTACHMENTS : undefined,
   random_id: peer_id * 100000 + (Date.now() % 100000),
   ...(keyboard && { keyboard: JSON.stringify(keyboard) })
 });
