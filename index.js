@@ -21,11 +21,21 @@ const cache = { blocklist: { data: null, lastModified: 0 }, allowlist: { data: n
 // VK API helper function
 const vkApi = async (method, params = {}) => {
   try {
-    const response = await axios.post(`${VK_API_URL}/${method}`, null, {
-      params: {
-        ...params,
-        access_token: TOKEN,
-        v: API_VERSION
+    // Use FormData for POST body instead of URL params to avoid 414 error
+    const formData = new URLSearchParams();
+    formData.append('access_token', TOKEN);
+    formData.append('v', API_VERSION);
+    
+    // Add all other parameters to form data
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null) {
+        formData.append(key, String(value));
+      }
+    }
+
+    const response = await axios.post(`${VK_API_URL}/${method}`, formData, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
       }
     });
     
