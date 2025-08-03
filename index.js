@@ -108,12 +108,18 @@ const filterUsers = users => {
   });
 };
 
-const sendMessage = async (peer_id, text, keyboard, excludeAttachments = false) => vkApi('messages.send', {
+const sendMessage = async (peer_id, text, keyboard) => vkApi('messages.send', {
   peer_id, 
   message: text, 
-  attachment: (!excludeAttachments && (process.env.ATTACHMENTS || '').trim()) || undefined,
   random_id: peer_id * 100000 + (Date.now() % 100000),
   ...(keyboard && { keyboard: JSON.stringify(keyboard) })
+});
+
+const sendBroadcastMessage = async (peer_id, text) => vkApi('messages.send', {
+  peer_id, 
+  message: text, 
+  attachment: (process.env.ATTACHMENTS || '').trim() || undefined,
+  random_id: peer_id * 100000 + (Date.now() % 100000)
 });
 
 // Check if user allows messages from community
@@ -229,7 +235,7 @@ async function sendBroadcast(messageTemplate, userObjects, dryRun = false) {
           const attachmentInfo = attachments ? `\nВложения: ${attachments}` : '\nВложения: нет';
           console.log(`[DRY RUN] Отправка ${user.id}: "${personalizedMessage.slice(0, 30)}..."${attachmentInfo}\n${JSON.stringify(user, null, 2)}\n[DRY RUN]`);
         } else {
-          await sendMessage(user.id, personalizedMessage);
+          await sendBroadcastMessage(user.id, personalizedMessage);
         }
         processed++;
         if (processed % 10 === 0 || processed === total) {
@@ -243,7 +249,7 @@ async function sendBroadcast(messageTemplate, userObjects, dryRun = false) {
         processed++;
         if (err.code === 429 && err.data?.parameters?.retry_after && !dryRun) {
           await new Promise(r => setTimeout(r, err.data.parameters.retry_after * 1000));
-          return sendMessage(user.id, personalizedMessage);
+          return sendBroadcastMessage(user.id, personalizedMessage);
         }
       }
     });
