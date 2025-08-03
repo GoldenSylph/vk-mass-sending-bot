@@ -463,32 +463,23 @@ bot.on('message', async ctx => {
       const payload = JSON.parse(ctx.message.payload);
       const command = payload.command;
       
-      // Execute the corresponding command
+      // Execute the corresponding command directly
       switch (command) {
         case 'собрать_айди':
-          ctx.message.text = '/собрать_айди';
-          break;
+          return await executeGatherIds(ctx);
         case 'тест_рассылки':
-          ctx.message.text = '/тест_рассылки';
-          break;
+          return await executeTestBroadcast(ctx);
         case 'рассылка':
-          ctx.message.text = '/рассылка';
-          break;
+          return await executeBroadcast(ctx);
         case 'показать_чёрный_список':
-          ctx.message.text = '/показать_чёрный_список';
-          break;
+          return await executeShowBlocklist(ctx);
         case 'показать_белый_список':
-          ctx.message.text = '/показать_белый_список';
-          break;
+          return await executeShowAllowlist(ctx);
         case 'помощь':
-          ctx.message.text = '/помощь';
-          break;
+          return await executeHelp(ctx);
         default:
           return;
       }
-      
-      // Re-trigger command processing
-      return;
     } catch (err) {
       console.error('Error parsing button payload:', err);
     }
@@ -499,32 +490,23 @@ bot.on('message', async ctx => {
   if (text) {
     switch (text) {
       case '📊 Собрать ID':
-        ctx.message.text = '/собрать_айди';
-        break;
+        return await executeGatherIds(ctx);
       case '🔍 Тест рассылки':
-        ctx.message.text = '/тест_рассылки';
-        break;
+        return await executeTestBroadcast(ctx);
       case '📡 Рассылка':
-        ctx.message.text = '/рассылка';
-        break;
+        return await executeBroadcast(ctx);
       case '📋 Чёрный список':
-        ctx.message.text = '/показать_чёрный_список';
-        break;
+        return await executeShowBlocklist(ctx);
       case '📋 Белый список':
-        ctx.message.text = '/показать_белый_список';
-        break;
+        return await executeShowAllowlist(ctx);
       case '❓ Помощь':
-        ctx.message.text = '/помощь';
-        break;
+        return await executeHelp(ctx);
     }
   }
 });
 
-bot.command('/собрать_айди', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
+// Extract command logic into separate functions
+async function executeGatherIds(ctx) {
   const keyboard = createAdminKeyboard();
   await sendMessage(ctx.message.peer_id, '⏳ Собираем ID участников сообщества…', keyboard);
   try {
@@ -534,21 +516,14 @@ bot.command('/собрать_айди', async ctx => {
     console.error(err);
     await sendMessage(ctx.message.peer_id, '❌ Не удалось собрать ID участников.', keyboard);
   }
-});
+}
 
-bot.command('/рассылка', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
+async function executeTestBroadcast(ctx) {
   const keyboard = createAdminKeyboard();
-  await sendMessage(ctx.message.peer_id, '📡 Обновляем список получателей…', keyboard);
+  await sendMessage(ctx.message.peer_id, '🔍 Запускаем тестовую рассылку (без отправки)…', keyboard);
 
   try {
     const users = await gatherUserIds(GROUP_ID);
-    const filteredUsers = filterUsers(users);
-    const allowlist = loadAllowlist();
-    const allowlistActive = allowlist.length > 0;
     
     let templateContent;
     try {
@@ -559,12 +534,52 @@ bot.command('/рассылка', async ctx => {
     
     if (!templateContent) return sendMessage(ctx.message.peer_id, '❗ Файл шаблона пуст.', keyboard);
 
+    const filteredUsers = filterUsers(users);
+    const allowlist = loadAllowlist();
+    const allowlistActive = allowlist.length > 0;
+
+    if (allowlistActive) {
+      const allowedUsers = users.filter(user => allowlist.includes(String(user.id)));
+      const blockedFromAllowedCount = allowedUsers.length - filteredUsers.length;
+      await sendMessage(ctx.message.peer_id, `🔍 Тестируем с ${filteredUsers.length} пользователями (белый список: ${allowedUsers.length}, заблокировано: ${blockedFromAllowedCount})`, keyboard);
+    } else {
+      const blockedCount = users.length - filteredUsers.length;
+      if (blockedCount > 0) {
+        await sendMessage(ctx.message.peer_id, `🔍 Тестируем с ${filteredUsers.length} пользователями (${blockedCount} заблокированных пользователей исключено)`, keyboard);
+      }
+    }
+
+    await broadcast(templateContent, users, true);
+    await sendMessage(ctx.message.peer_id, '✅ Тестовая рассылка завершена (реальные сообщения не отправлялись).', keyboard);
+  } catch (err) {
+    console.error(err);
+    await sendMessage(ctx.message.peer_id, '❌ Тестовая рассылка не удалась: ' + err.message, keyboard);
+  }
+}
+
+async function executeBroadcast(ctx) {
+  const keyboard = createAdminKeyboard();
+  await sendMessage(ctx.message.peer_id, '📡 Обновляем список получателей…', keyboard);
+
+  try {
+    const users = await gatherUserIds(GROUP_ID);
+    
+    let templateContent;
+    try {
+      templateContent = readFileSync('./broadcast_template.txt', 'utf-8').trim();
+    } catch (err) {
+      return sendMessage(ctx.message.peer_id, '❗ Не удалось прочитать файл broadcast_template.txt.', keyboard);
+    }
+    
+    if (!templateContent) return sendMessage(ctx.message.peer_id, '❗ Файл шаблона пуст.', keyboard);
+
+    const filteredUsers = filterUsers(users);
+    const allowlist = loadAllowlist();
+    const allowlistActive = allowlist.length > 0;
+
     let statusMessage = '';
     if (allowlistActive) {
-      const allowedUsers = users.filter(user => {
-        const allowlist = loadAllowlist();
-        return allowlist.includes(String(user.id));
-      });
+      const allowedUsers = users.filter(user => allowlist.includes(String(user.id)));
       const notAllowedCount = users.length - allowedUsers.length;
       const blockedFromAllowedCount = allowedUsers.length - filteredUsers.length;
       
@@ -585,106 +600,9 @@ bot.command('/рассылка', async ctx => {
     console.error(err);
     await sendMessage(ctx.message.peer_id, '❌ Рассылка не удалась: ' + err.message, keyboard);
   }
-});
+}
 
-bot.command('/тест_рассылки', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
-  const keyboard = createAdminKeyboard();
-  await sendMessage(ctx.message.peer_id, '🔍 Запускаем тестовую рассылку (без отправки)…', keyboard);
-
-  try {
-    const users = await gatherUserIds(GROUP_ID);
-    const filteredUsers = filterUsers(users);
-    const allowlist = loadAllowlist();
-    const allowlistActive = allowlist.length > 0;
-    
-    let templateContent;
-    try {
-      templateContent = readFileSync('./broadcast_template.txt', 'utf-8').trim();
-    } catch (err) {
-      return sendMessage(ctx.message.peer_id, '❗ Не удалось прочитать файл broadcast_template.txt.', keyboard);
-    }
-    
-    if (!templateContent) return sendMessage(ctx.message.peer_id, '❗ Файл шаблона пуст.', keyboard);
-
-    if (allowlistActive) {
-      const allowedUsers = users.filter(user => {
-        const allowlist = loadAllowlist();
-        return allowlist.includes(String(user.id));
-      });
-      const blockedFromAllowedCount = allowedUsers.length - filteredUsers.length;
-      await sendMessage(ctx.message.peer_id, `🔍 Тестируем с ${filteredUsers.length} пользователями (белый список: ${allowedUsers.length}, заблокировано: ${blockedFromAllowedCount})`, keyboard);
-    } else {
-      const blockedCount = users.length - filteredUsers.length;
-      if (blockedCount > 0) {
-        await sendMessage(ctx.message.peer_id, `🔍 Тестируем с ${filteredUsers.length} пользователями (${blockedCount} заблокированных пользователей исключено)`, keyboard);
-      }
-    }
-
-    await broadcast(templateContent, users, true);
-    await sendMessage(ctx.message.peer_id, '✅ Тестовая рассылка завершена (реальные сообщения не отправлялись).', keyboard);
-  } catch (err) {
-    console.error(err);
-    await sendMessage(ctx.message.peer_id, '❌ Тестовая рассылка не удалась: ' + err.message, keyboard);
-  }
-});
-
-bot.command('/заблокировать', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
-  const keyboard = createAdminKeyboard();
-  const args = ctx.message.text.split(' ').slice(1);
-  if (args.length < 1) {
-    return sendMessage(ctx.message.peer_id, '❗ Использование: /заблокировать <id_пользователя>', keyboard);
-  }
-
-  const userId = args[0];
-
-  try {
-    if (addToBlocklist(userId)) {
-      await sendMessage(ctx.message.peer_id, `🚫 Добавлен ID пользователя "${userId}" в чёрный список.`, keyboard);
-    } else {
-      await sendMessage(ctx.message.peer_id, `⚠️ ID пользователя "${userId}" уже в чёрном списке.`, keyboard);
-    }
-  } catch (err) {
-    await sendMessage(ctx.message.peer_id, `❌ Ошибка: ${err.message}`, keyboard);
-  }
-});
-
-bot.command('/разблокировать', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
-  const keyboard = createAdminKeyboard();
-  const args = ctx.message.text.split(' ').slice(1);
-  if (args.length < 1) {
-    return sendMessage(ctx.message.peer_id, '❗ Использование: /разблокировать <id_пользователя>', keyboard);
-  }
-
-  const userId = args[0];
-
-  try {
-    if (removeFromBlocklist(userId)) {
-      await sendMessage(ctx.message.peer_id, `✅ Убран ID пользователя "${userId}" из чёрного списка.`, keyboard);
-    } else {
-      await sendMessage(ctx.message.peer_id, `⚠️ ID пользователя "${userId}" не найден в чёрном списке.`, keyboard);
-    }
-  } catch (err) {
-    await sendMessage(ctx.message.peer_id, `❌ Ошибка: ${err.message}`, keyboard);
-  }
-});
-
-bot.command('/показать_чёрный_список', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
+async function executeShowBlocklist(ctx) {
   const keyboard = createAdminKeyboard();
   const blocklist = loadBlocklist();
   
@@ -697,7 +615,51 @@ bot.command('/показать_чёрный_список', async ctx => {
     .join('\n');
 
   await sendMessage(ctx.message.peer_id, `📋 Заблокированные пользователи (${blocklist.length}):\n${blocklistText}`, keyboard);
-});
+}
+
+async function executeShowAllowlist(ctx) {
+  const keyboard = createAdminKeyboard();
+  const allowlist = loadAllowlist();
+  
+  if (allowlist.length === 0) {
+    return sendMessage(ctx.message.peer_id, '📋 Белый список пуст (все пользователи разрешены кроме заблокированных).', keyboard);
+  }
+
+  const allowlistText = allowlist
+    .map((userId, index) => `${index + 1}. ${userId}`)
+    .join('\n');
+
+  await sendMessage(ctx.message.peer_id, `📋 Разрешённые пользователи (${allowlist.length}):\n${allowlistText}`, keyboard);
+}
+
+async function executeHelp(ctx) {
+  const helpText = `🤖 Команды VK бота массовой рассылки:
+
+📊 /собрать_айди - Собрать ID участников сообщества
+🔍 /тест_рассылки - Запустить тестовую рассылку (без отправки)
+📡 /рассылка - Отправить рассылку всем пользователям
+📋 /показать_чёрный_список - Показать заблокированных пользователей
+📋 /показать_белый_список - Показать разрешённых пользователей
+🗑️ /очистить_чёрный_список - Очистить чёрный список
+🗑️ /очистить_белый_список - Очистить белый список (разрешить всех)
+🚫 /заблокировать <id> - Заблокировать пользователя
+✅ /разблокировать <id> - Разблокировать пользователя
+✅ /разрешить <id> - Добавить пользователя в белый список
+❌ /запретить <id> - Убрать пользователя из белого списка
+
+Переменные шаблона: {{first_name}}, {{last_name}}, {{id}}`;
+
+  const keyboard = createAdminKeyboard();
+  await sendMessage(ctx.message.peer_id, helpText, keyboard);
+}
+
+bot.command('/собрать_айди', executeGatherIds);
+
+bot.command('/рассылка', executeBroadcast);
+
+bot.command('/тест_рассылки', executeTestBroadcast);
+
+bot.command('/показать_чёрный_список', executeShowBlocklist);
 
 bot.command('/очистить_чёрный_список', async ctx => {
   if (!isAdmin(ctx.message.from_id)) {
@@ -757,24 +719,7 @@ bot.command('/запретить', async ctx => {
   }
 });
 
-bot.command('/показать_белый_список', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
-  const keyboard = createAdminKeyboard();
-  const allowlist = loadAllowlist();
-  
-  if (allowlist.length === 0) {
-    return sendMessage(ctx.message.peer_id, '📋 Белый список пуст (все пользователи разрешены кроме заблокированных).', keyboard);
-  }
-
-  const allowlistText = allowlist
-    .map((userId, index) => `${index + 1}. ${userId}`)
-    .join('\n');
-
-  await sendMessage(ctx.message.peer_id, `📋 Разрешённые пользователи (${allowlist.length}):\n${allowlistText}`, keyboard);
-});
+bot.command('/показать_белый_список', executeShowAllowlist);
 
 bot.command('/очистить_белый_список', async ctx => {
   if (!isAdmin(ctx.message.from_id)) {
@@ -786,57 +731,52 @@ bot.command('/очистить_белый_список', async ctx => {
   await sendMessage(ctx.message.peer_id, '🗑️ Белый список очищен (теперь все пользователи разрешены кроме заблокированных).', keyboard);
 });
 
-// Keep English commands for backward compatibility
-bot.command('/start', async ctx => {
-  ctx.message.text = '/начать';
+bot.command('/заблокировать', async ctx => {
+  if (!isAdmin(ctx.message.from_id)) {
+    return ctx.reply('⚠️ Доступ запрещён.');
+  }
+
+  const keyboard = createAdminKeyboard();
+  const args = ctx.message.text.split(' ').slice(1);
+  if (args.length < 1) {
+    return sendMessage(ctx.message.peer_id, '❗ Использование: /заблокировать <id_пользователя>', keyboard);
+  }
+
+  const userId = args[0];
+
+  try {
+    if (addToBlocklist(userId)) {
+      await sendMessage(ctx.message.peer_id, `🚫 Добавлен ID пользователя "${userId}" в чёрный список.`, keyboard);
+    } else {
+      await sendMessage(ctx.message.peer_id, `⚠️ ID пользователя "${userId}" уже в чёрном списке.`, keyboard);
+    }
+  } catch (err) {
+    await sendMessage(ctx.message.peer_id, `❌ Ошибка: ${err.message}`, keyboard);
+  }
 });
 
-bot.command('/help', async ctx => {
-  ctx.message.text = '/помощь';
-});
+bot.command('/разблокировать', async ctx => {
+  if (!isAdmin(ctx.message.from_id)) {
+    return ctx.reply('⚠️ Доступ запрещён.');
+  }
 
-bot.command('/gather_ids', async ctx => {
-  ctx.message.text = '/собрать_айди';
-});
+  const keyboard = createAdminKeyboard();
+  const args = ctx.message.text.split(' ').slice(1);
+  if (args.length < 1) {
+    return sendMessage(ctx.message.peer_id, '❗ Использование: /разблокировать <id_пользователя>', keyboard);
+  }
 
-bot.command('/broadcast', async ctx => {
-  ctx.message.text = '/рассылка';
-});
+  const userId = args[0];
 
-bot.command('/test_broadcast', async ctx => {
-  ctx.message.text = '/тест_рассылки';
-});
-
-bot.command('/block_user', async ctx => {
-  ctx.message.text = ctx.message.text.replace('/block_user', '/заблокировать');
-});
-
-bot.command('/unblock_user', async ctx => {
-  ctx.message.text = ctx.message.text.replace('/unblock_user', '/разблокировать');
-});
-
-bot.command('/show_blocklist', async ctx => {
-  ctx.message.text = '/показать_чёрный_список';
-});
-
-bot.command('/clear_blocklist', async ctx => {
-  ctx.message.text = '/очистить_чёрный_список';
-});
-
-bot.command('/allow_user', async ctx => {
-  ctx.message.text = ctx.message.text.replace('/allow_user', '/разрешить');
-});
-
-bot.command('/unallow_user', async ctx => {
-  ctx.message.text = ctx.message.text.replace('/unallow_user', '/запретить');
-});
-
-bot.command('/show_allowlist', async ctx => {
-  ctx.message.text = '/показать_белый_список';
-});
-
-bot.command('/clear_allowlist', async ctx => {
-  ctx.message.text = '/очистить_белый_список';
+  try {
+    if (removeFromBlocklist(userId)) {
+      await sendMessage(ctx.message.peer_id, `✅ Убран ID пользователя "${userId}" из чёрного списка.`, keyboard);
+    } else {
+      await sendMessage(ctx.message.peer_id, `⚠️ ID пользователя "${userId}" не найден в чёрном списке.`, keyboard);
+    }
+  } catch (err) {
+    await sendMessage(ctx.message.peer_id, `❌ Ошибка: ${err.message}`, keyboard);
+  }
 });
 
 console.log('🔗 Бот запущен...');
