@@ -8,10 +8,10 @@ import Handlebars from 'handlebars';
 
 dotenv.config();
 
-const { SECRET, CONFIRMATION, PORT = 8080, VK_TOKEN: TOKEN, VK_GROUP_ID: GROUP_ID, ADMIN_IDS } = process.env;
-const ADMIN_LIST = (ADMIN_IDS || '').split(',').map(Number).filter(id => !isNaN(id));
+const { SECRET, CONFIRMATION, PORT = 8080, VK_TOKEN: token, VK_GROUP_ID: groupId, ADMIN_IDS: adminIds } = process.env;
+const adminList = (adminIds || '').split(',').map(Number).filter(id => !isNaN(id));
 
-if (!TOKEN || !GROUP_ID || !ADMIN_LIST.length) process.exit(console.error('❌ Missing VK_TOKEN, VK_GROUP_ID, ADMIN_IDS'));
+if (!token || !groupId || !adminList.length) process.exit(console.error('❌ Missing VK_TOKEN, VK_GROUP_ID, ADMIN_IDS'));
 
 const VK_API_URL = 'https://api.vk.com/method';
 const API_VERSION = '5.199';
@@ -23,7 +23,7 @@ const vkApi = async (method, params = {}) => {
   try {
     // Use FormData for POST body instead of URL params to avoid 414 error
     const formData = new URLSearchParams();
-    formData.append('access_token', TOKEN);
+    formData.append('access_token', token);
     formData.append('v', API_VERSION);
     
     // Add all other parameters to form data
@@ -58,7 +58,7 @@ const vkApi = async (method, params = {}) => {
   }
 };
 
-const isAdmin = userId => ADMIN_LIST.includes(userId);
+const isAdmin = userId => adminList.includes(userId);
 
 const loadList = (file, key) => {
   try {
@@ -117,16 +117,16 @@ const sendMessage = async (peer_id, text, keyboard) => vkApi('messages.send', {
 });
 
 // Check if user allows messages from community
-const canSendMessage = async (user_id) => {
+const canSendMessage = async (userId) => {
   try {
     const response = await vkApi('messages.isMessagesFromGroupAllowed', {
-      group_id: GROUP_ID,
-      user_id: user_id
+      group_id: groupId,
+      user_id: userId
     });
     return response.is_allowed === 1;
   } catch (error) {
     // If error occurs, assume we can't send (conservative approach)
-    console.warn(`Can't check message permission for user ${user_id}:`, error.message);
+    console.warn(`Can't check message permission for user ${userId}:`, error.message);
     return false;
   }
 };
@@ -161,7 +161,7 @@ const resolveUserNames = async (userIds) => {
   }
 };
 
-async function gatherUserIds(group_id) {
+async function getUserIds(groupId) {
   const members = [];
   let offset = 0;
   const count = 1000;
@@ -169,7 +169,7 @@ async function gatherUserIds(group_id) {
 
   while (true) {
     const data = await queue.add(() => vkApi('groups.getMembers', {
-      group_id, offset, count, fields: 'first_name,last_name'
+      group_id: groupId, offset, count, fields: 'first_name,last_name'
     }));
 
     if (total === null) total = data.count;
@@ -183,7 +183,7 @@ async function gatherUserIds(group_id) {
   return members;
 }
 
-async function broadcast(messageTemplate, userObjects, dryRun = false) {
+async function sendBroadcast(messageTemplate, userObjects, dryRun = false) {
   const template = Handlebars.compile(messageTemplate);
   const filteredUsers = filterUsers(userObjects);
   const filteredCount = userObjects.length - filteredUsers.length;
@@ -225,7 +225,7 @@ async function broadcast(messageTemplate, userObjects, dryRun = false) {
         }
 
         if (dryRun) {
-          console.log(`[DRY RUN] Отправка ${user.id}: "${personalizedMessage}"`);
+          console.log(`[DRY RUN] Отправка ${user.id}: "${personalizedMessage.slice(0, 30)}...\n${user}\n[DRY RUN]"`);
         } else {
           await sendMessage(user.id, personalizedMessage);
         }
@@ -273,11 +273,11 @@ const createKeyboard = () => ({
 
 // Command handlers
 const commands = {
-  async gatherIds(ctx) {
+  async collectIds(ctx) {
     const keyboard = createKeyboard();
     await sendMessage(ctx.message.peer_id, '⏳ Собираем ID участников сообщества…', keyboard);
     try {
-      const members = await gatherUserIds(GROUP_ID);
+      const members = await getUserIds(groupId);
       await sendMessage(ctx.message.peer_id, `✅ Собрано ${members.length} ID пользователей.`, keyboard);
     } catch (err) {
       console.error(err);
@@ -290,7 +290,7 @@ const commands = {
     await sendMessage(ctx.message.peer_id, '🔍 Запускаем тестовую рассылку (без отправки)…', keyboard);
 
     try {
-      const users = await gatherUserIds(GROUP_ID);
+      const users = await getUserIds(groupId);
       
       let templateContent;
       try {
@@ -307,7 +307,7 @@ const commands = {
         await sendMessage(ctx.message.peer_id, `🧪 Тестируем с ${filteredUsers.length} пользователями (${blockedCount} исключено)`, keyboard);
       }
 
-      await broadcast(templateContent, users, true);
+      await sendBroadcast(templateContent, users, true);
       await sendMessage(ctx.message.peer_id, '✅ Тестовая рассылка завершена (реальные сообщения не отправлялись).', keyboard);
     } catch (err) {
       console.error(err);
@@ -315,12 +315,12 @@ const commands = {
     }
   },
 
-  async broadcast(ctx) {
+  async startBroadcast(ctx) {
     const keyboard = createKeyboard();
     await sendMessage(ctx.message.peer_id, '📡 Обновляем список получателей…', keyboard);
 
     try {
-      const users = await gatherUserIds(GROUP_ID);
+      const users = await getUserIds(groupId);
       
       let templateContent;
       try {
@@ -339,7 +339,7 @@ const commands = {
         : `📬 Отправляем ${filteredUsers.length} пользователям`;
       
       await sendMessage(ctx.message.peer_id, statusMessage, keyboard);
-      await broadcast(templateContent, users);
+      await sendBroadcast(templateContent, users);
       await sendMessage(ctx.message.peer_id, '✅ Рассылка завершена.', keyboard);
     } catch (err) {
       console.error(err);
@@ -372,17 +372,17 @@ const commands = {
   async help(ctx) {
     const helpText = `🤖 Команды бота массовой рассылки для РО Челябинска партии "Рассвет":
 
-📊 /собрать_айди - Собрать ID участников сообщества
-🔍 /тест_рассылки - Запустить тестовую рассылку (без отправки)
-📡 /рассылка - Отправить рассылку всем пользователям
-📋 /показать_чёрный_список - Показать заблокированных пользователей
-📋 /показать_белый_список - Показать разрешённых пользователей
-🗑️ /очистить_чёрный_список - Очистить чёрный список
-🗑️ /очистить_белый_список - Очистить белый список
-🚫 /заблокировать <id> - Заблокировать пользователя
-✅ /разблокировать <id> - Разблокировать пользователя
-✅ /разрешить <id> - Добавить в белый список
-❌ /запретить <id> - Убрать из белого списка
+📊 /collect_ids - Собрать ID участников сообщества
+🔍 /test_broadcast - Запустить тестовую рассылку (без отправки)
+📡 /start_broadcast - Отправить рассылку всем пользователям
+📋 /show_blocklist - Показать заблокированных пользователей
+📋 /show_allowlist - Показать разрешённых пользователей
+🗑️ /clear_blocklist - Очистить чёрный список
+🗑️ /clear_allowlist - Очистить белый список
+🚫 /block <id> - Заблокировать пользователя
+✅ /unblock <id> - Разблокировать пользователя
+✅ /allow <id> - Добавить в белый список
+❌ /disallow <id> - Убрать из белого списка
 
 Переменные шаблона: {{first_name}}, {{last_name}}, {{id}}`;
 
@@ -429,7 +429,7 @@ const handleMessage = async (message) => {
     // Handle start command
     if (text === '/начать' || text === 'Начать') {
       if (!isAdmin(userId)) {
-        return ctx.reply(`⚠️ Этот бот только для администраторов.\n\nОбратитесь к админам: ${ADMIN_LIST.map(id => `[id${id}|Админ]`).join(', ')}`);
+        return ctx.reply(`⚠️ Этот бот только для администраторов.\n\nОбратитесь к админам: ${adminList.map(id => `[id${id}|Админ]`).join(', ')}`);
       }
       await sendMessage(message.peer_id, '🤖 VK Бот массовой рассылки\n\nИспользуйте кнопки ниже для выполнения команд:', createKeyboard());
       return;
@@ -443,14 +443,14 @@ const handleMessage = async (message) => {
       if (text && !text.startsWith('/')) {
         const senderInfo = `[id${userId}|Пользователь ${userId}]`;
         const forwardMessage = `📨 Сообщение от ${senderInfo}:\n\n"${text}"`;
-        for (const adminId of ADMIN_LIST) {
+        for (const adminId of adminList) {
           try { 
             await sendMessage(adminId, forwardMessage); 
           } catch (err) { 
             console.error(`Failed to forward to ${adminId}:`, err); 
           }
         }
-        return ctx.reply(`✅ Ваше сообщение переслано администраторам: ${ADMIN_LIST.map(id => `[id${id}|Админ]`).join(', ')}`);
+        return ctx.reply(`✅ Ваше сообщение переслано администраторам: ${adminList.map(id => `[id${id}|Админ]`).join(', ')}`);
       }
     }
   } catch (error) {
@@ -464,36 +464,36 @@ const handleAdminCommand = async (ctx, text) => {
   try {
     // Simple command mapping
     const commandHandlers = {
-      '/помощь': () => commands.help(ctx),
-      '/собрать_айди': () => commands.gatherIds(ctx),
-      '/рассылка': () => commands.broadcast(ctx),
-      '/тест_рассылки': () => commands.testBroadcast(ctx),
-      '/показать_чёрный_список': () => commands.showList(ctx, 'blocklist'),
-      '/показать_белый_список': () => commands.showList(ctx, 'allowlist'),
-      '📊 Собрать ID': () => commands.gatherIds(ctx),
+      '/help': () => commands.help(ctx),
+      '/collect_ids': () => commands.collectIds(ctx),
+      '/start_broadcast': () => commands.startBroadcast(ctx),
+      '/test_broadcast': () => commands.testBroadcast(ctx),
+      '/show_blocklist': () => commands.showList(ctx, 'blocklist'),
+      '/show_allowlist': () => commands.showList(ctx, 'allowlist'),
+      '📊 Собрать ID': () => commands.collectIds(ctx),
       '🔍 Тест рассылки': () => commands.testBroadcast(ctx),
-      '📡 Рассылка': () => commands.broadcast(ctx),
+      '📡 Рассылка': () => commands.startBroadcast(ctx),
       '📋 Чёрный список': () => commands.showList(ctx, 'blocklist'),
       '📋 Белый список': () => commands.showList(ctx, 'allowlist'),
       '❓ Помощь': () => commands.help(ctx)
     };
     
     // Handle list management commands
-    if (text?.startsWith('/очистить_чёрный_список')) {
+    if (text?.startsWith('/clear_blocklist')) {
       saveBlocklist([]);
       return sendMessage(ctx.message.peer_id, '🗑️ Чёрный список очищен.', keyboard);
     }
-    if (text?.startsWith('/очистить_белый_список')) {
+    if (text?.startsWith('/clear_allowlist')) {
       saveAllowlist([]);
       return sendMessage(ctx.message.peer_id, '🗑️ Белый список очищен.', keyboard);
     }
     
     // Handle user management commands
     const userCommands = {
-      '/заблокировать': { action: addToBlocklist, success: '🚫 Добавлен в чёрный список.', exists: '⚠️ Уже в чёрном списке.' },
-      '/разблокировать': { action: removeFromBlocklist, success: '✅ Убран из чёрного списка.', exists: '⚠️ Не найден в чёрном списке.' },
-      '/разрешить': { action: addToAllowlist, success: '✅ Добавлен в белый список.', exists: '⚠️ Уже в белом списке.' },
-      '/запретить': { action: removeFromAllowlist, success: '✅ Убран из белого списка.', exists: '⚠️ Не найден в белом списке.' }
+      '/block': { action: addToBlocklist, success: '🚫 Добавлен в чёрный список.', exists: '⚠️ Уже в чёрном списке.' },
+      '/unblock': { action: removeFromBlocklist, success: '✅ Убран из чёрного списка.', exists: '⚠️ Не найден в чёрном списке.' },
+      '/allow': { action: addToAllowlist, success: '✅ Добавлен в белый список.', exists: '⚠️ Уже в белом списке.' },
+      '/disallow': { action: removeFromAllowlist, success: '✅ Убран из белого списка.', exists: '⚠️ Не найден в белом списке.' }
     };
     
     for (const [cmd, config] of Object.entries(userCommands)) {
