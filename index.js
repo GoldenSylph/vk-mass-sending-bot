@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 import express from 'express';
 import bodyParser from 'body-parser';
 import { statSync, readFileSync, writeFileSync, promises } from 'fs';
-import VkBot from 'node-vk-bot-api';
+import axios from 'axios';
 import PQueue from 'p-queue';
 import Handlebars from 'handlebars';
 
@@ -13,11 +13,43 @@ const ADMIN_LIST = (ADMIN_IDS || '').split(',').map(Number).filter(id => !isNaN(
 
 if (!TOKEN || !GROUP_ID || !ADMIN_LIST.length) process.exit(console.error('❌ Missing VK_TOKEN, VK_GROUP_ID, ADMIN_IDS'));
 
-const bot = new VkBot({ token: TOKEN, group_id: Number(GROUP_ID), api: { v: '5.199' }, confirmation: CONFIRMATION, secret: SECRET });
+const VK_API_URL = 'https://api.vk.com/method';
+const API_VERSION = '5.199';
 const queue = new PQueue({ intervalCap: 30, interval: 1000 });
 const cache = { blocklist: { data: null, lastModified: 0 }, allowlist: { data: null, lastModified: 0 } };
 
+// VK API helper function
+const vkApi = async (method, params = {}) => {
+  try {
+    const response = await axios.post(`${VK_API_URL}/${method}`, null, {
+      params: {
+        ...params,
+        access_token: TOKEN,
+        v: API_VERSION
+      }
+    });
+    
+    if (response.data.error) {
+      const error = new Error(response.data.error.error_msg);
+      error.code = response.data.error.error_code;
+      error.data = response.data.error;
+      throw error;
+    }
+    
+    return response.data.response;
+  } catch (error) {
+    if (error.response?.data?.error) {
+      const vkError = new Error(error.response.data.error.error_msg);
+      vkError.code = error.response.data.error.error_code;
+      vkError.data = error.response.data.error;
+      throw vkError;
+    }
+    throw error;
+  }
+};
+
 const isAdmin = userId => ADMIN_LIST.includes(userId);
+
 const loadList = (file, key) => {
   try {
     const stats = statSync(file);
@@ -31,11 +63,13 @@ const loadList = (file, key) => {
     return cache[key].data;
   }
 };
+
 const saveList = (file, key, list) => {
   writeFileSync(file, JSON.stringify(list, null, 2));
   cache[key].data = list;
   cache[key].lastModified = Date.now();
 };
+
 const modifyList = (file, key, userId, action) => {
   const list = loadList(file, key);
   const id = String(userId);
@@ -64,8 +98,9 @@ const filterUsers = users => {
   });
 };
 
-const sendMessage = async (peer_id, text, keyboard) => bot.api('messages.send', {
-  peer_id, message: text, 
+const sendMessage = async (peer_id, text, keyboard) => vkApi('messages.send', {
+  peer_id, 
+  message: text, 
   attachment: (process.env.ATTACHMENTS || '').trim() || undefined,
   random_id: peer_id * 100000 + (Date.now() % 100000),
   ...(keyboard && { keyboard: JSON.stringify(keyboard) })
@@ -78,7 +113,7 @@ async function gatherUserIds(group_id) {
   let total = null;
 
   while (true) {
-    const data = await queue.add(() => bot.api('groups.getMembers', {
+    const data = await queue.add(() => vkApi('groups.getMembers', {
       group_id, offset, count, fields: 'first_name,last_name'
     }));
 
@@ -149,7 +184,7 @@ const createKeyboard = () => ({
     ],
     [
       { action: { type: "text", label: "📡 Рассылка" }, color: "positive" },
-      { action: { type: "text", label: "� Чёрный список" }, color: "secondary" }
+      { action: { type: "text", label: "📋 Чёрный список" }, color: "secondary" }
     ],
     [
       { action: { type: "text", label: "📋 Белый список" }, color: "secondary" },
@@ -191,7 +226,7 @@ const commands = {
       const filteredUsers = filterUsers(users);
       const blockedCount = users.length - filteredUsers.length;
       if (blockedCount > 0) {
-        await sendMessage(ctx.message.peer_id, `� Тестируем с ${filteredUsers.length} пользователями (${blockedCount} исключено)`, keyboard);
+        await sendMessage(ctx.message.peer_id, `🧪 Тестируем с ${filteredUsers.length} пользователями (${blockedCount} исключено)`, keyboard);
       }
 
       await broadcast(templateContent, users, true);
@@ -271,84 +306,142 @@ const commands = {
   }
 };
 
-// Bot handlers  
-bot.use(async (ctx, next) => { try { await next(); } catch (err) { console.error('Bot error:', err); } });
-
-bot.command('/начать', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply(`⚠️ Этот бот только для администраторов.\n\nОбратитесь к админам: ${ADMIN_LIST.map(id => `[id${id}|Админ]`).join(', ')}`);
+// Webhook handler for VK callbacks
+const handleWebhook = async (req, res) => {
+  try {
+    const { type, object, secret } = req.body;
+    
+    // Verify secret if provided
+    if (SECRET && secret !== SECRET) {
+      return res.status(401).send('Unauthorized');
+    }
+    
+    switch (type) {
+      case 'confirmation':
+        return res.send(CONFIRMATION);
+        
+      case 'message_new':
+        await handleMessage(object.message);
+        break;
+    }
+    
+    res.send('ok');
+  } catch (error) {
+    console.error('Webhook error:', error);
+    res.status(500).send('Internal Server Error');
   }
-  await sendMessage(ctx.message.peer_id, '🤖 VK Бот массовой рассылки\n\nИспользуйте кнопки ниже для выполнения команд:', createKeyboard());
-});
-
-// Command mapping
-const commandMap = {
-  '/помощь': () => commands.help, '/собрать_айди': () => commands.gatherIds, '/рассылка': () => commands.broadcast,
-  '/тест_рассылки': () => commands.testBroadcast, '/показать_чёрный_список': () => commands.showList,
-  '/показать_белый_список': () => commands.showList, '📊 Собрать ID': () => commands.gatherIds,
-  '🔍 Тест рассылки': () => commands.testBroadcast, '📡 Рассылка': () => commands.broadcast,
-  '📋 Чёрный список': () => commands.showList, '📋 Белый список': () => commands.showList, '❓ Помощь': () => commands.help
 };
 
-Object.keys(commandMap).forEach(cmd => {
-  if (cmd.startsWith('/')) {
-    bot.command(cmd, async ctx => {
-      if (!isAdmin(ctx.message.from_id)) return ctx.reply('⚠️ Доступ запрещён.');
-      const handler = commandMap[cmd]();
-      if (cmd.includes('белый')) await handler(ctx, 'allowlist');
-      else if (cmd.includes('чёрный')) await handler(ctx, 'blocklist');
-      else await handler(ctx);
-    });
-  }
-});
-
-// List management
-[
-  { cmd: '/очистить_чёрный_список', action: () => saveBlocklist([]), msg: '🗑️ Чёрный список очищен.' },
-  { cmd: '/очистить_белый_список', action: () => saveAllowlist([]), msg: '🗑️ Белый список очищен.' },
-  { cmd: '/заблокировать', action: addToBlocklist, success: '🚫 Добавлен в чёрный список.', exists: '⚠️ Уже в чёрном списке.' },
-  { cmd: '/разблокировать', action: removeFromBlocklist, success: '✅ Убран из чёрного списка.', exists: '⚠️ Не найден в чёрном списке.' },
-  { cmd: '/разрешить', action: addToAllowlist, success: '✅ Добавлен в белый список.', exists: '⚠️ Уже в белом списке.' },
-  { cmd: '/запретить', action: removeFromAllowlist, success: '✅ Убран из белого списка.', exists: '⚠️ Не найден в белом списке.' }
-].forEach(({ cmd, action, msg, success, exists }) => {
-  bot.command(cmd, async ctx => {
-    if (!isAdmin(ctx.message.from_id)) return ctx.reply('⚠️ Доступ запрещён.');
-    const keyboard = createKeyboard();
-    if (msg) { action(); return sendMessage(ctx.message.peer_id, msg, keyboard); }
-    const args = ctx.message.text.split(' ').slice(1);
-    if (args.length < 1) return sendMessage(ctx.message.peer_id, `❗ Использование: ${cmd} <id_пользователя>`, keyboard);
-    try {
-      const result = action(args[0]);
-      await sendMessage(ctx.message.peer_id, result ? success : exists, keyboard);
-    } catch (err) {
-      await sendMessage(ctx.message.peer_id, `❌ Ошибка: ${err.message}`, keyboard);
-    }
-  });
-});
-
-bot.on('message', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    if (ctx.message.text && !ctx.message.text.startsWith('/')) {
-      const senderInfo = `[id${ctx.message.from_id}|Пользователь ${ctx.message.from_id}]`;
-      const forwardMessage = `📨 Сообщение от ${senderInfo}:\n\n"${ctx.message.text}"`;
-      for (const adminId of ADMIN_LIST) {
-        try { await sendMessage(adminId, forwardMessage); } catch (err) { console.error(`Failed to forward to ${adminId}:`, err); }
+const handleMessage = async (message) => {
+  try {
+    const ctx = {
+      message,
+      reply: (text, keyboard) => sendMessage(message.peer_id, text, keyboard)
+    };
+    
+    const text = message.text?.trim();
+    const userId = message.from_id;
+    
+    // Handle start command
+    if (text === '/начать' || text === 'Начать') {
+      if (!isAdmin(userId)) {
+        return ctx.reply(`⚠️ Этот бот только для администраторов.\n\nОбратитесь к админам: ${ADMIN_LIST.map(id => `[id${id}|Админ]`).join(', ')}`);
       }
-      return ctx.reply(`✅ Ваше сообщение переслано администраторам: ${ADMIN_LIST.map(id => `[id${id}|Админ]`).join(', ')}`);
+      await sendMessage(message.peer_id, '🤖 VK Бот массовой рассылки\n\nИспользуйте кнопки ниже для выполнения команд:', createKeyboard());
+      return;
     }
-    return;
+    
+    // Handle admin commands
+    if (isAdmin(userId)) {
+      await handleAdminCommand(ctx, text);
+    } else {
+      // Forward non-admin messages to admins
+      if (text && !text.startsWith('/')) {
+        const senderInfo = `[id${userId}|Пользователь ${userId}]`;
+        const forwardMessage = `📨 Сообщение от ${senderInfo}:\n\n"${text}"`;
+        for (const adminId of ADMIN_LIST) {
+          try { 
+            await sendMessage(adminId, forwardMessage); 
+          } catch (err) { 
+            console.error(`Failed to forward to ${adminId}:`, err); 
+          }
+        }
+        return ctx.reply(`✅ Ваше сообщение переслано администраторам: ${ADMIN_LIST.map(id => `[id${id}|Админ]`).join(', ')}`);
+      }
+    }
+  } catch (error) {
+    console.error('Error handling message:', error);
   }
-  const text = ctx.message.text?.trim();
-  if (text && commandMap[text]) {
-    const handler = commandMap[text]();
-    if (text.includes('Белый')) await handler(ctx, 'allowlist');
-    else if (text.includes('Чёрный')) await handler(ctx, 'blocklist');
-    else await handler(ctx);
+};
+
+const handleAdminCommand = async (ctx, text) => {
+  const keyboard = createKeyboard();
+  
+  try {
+    // Simple command mapping
+    const commandHandlers = {
+      '/помощь': () => commands.help(ctx),
+      '/собрать_айди': () => commands.gatherIds(ctx),
+      '/рассылка': () => commands.broadcast(ctx),
+      '/тест_рассылки': () => commands.testBroadcast(ctx),
+      '/показать_чёрный_список': () => commands.showList(ctx, 'blocklist'),
+      '/показать_белый_список': () => commands.showList(ctx, 'allowlist'),
+      '📊 Собрать ID': () => commands.gatherIds(ctx),
+      '🔍 Тест рассылки': () => commands.testBroadcast(ctx),
+      '📡 Рассылка': () => commands.broadcast(ctx),
+      '📋 Чёрный список': () => commands.showList(ctx, 'blocklist'),
+      '📋 Белый список': () => commands.showList(ctx, 'allowlist'),
+      '❓ Помощь': () => commands.help(ctx)
+    };
+    
+    // Handle list management commands
+    if (text?.startsWith('/очистить_чёрный_список')) {
+      saveBlocklist([]);
+      return sendMessage(ctx.message.peer_id, '🗑️ Чёрный список очищен.', keyboard);
+    }
+    if (text?.startsWith('/очистить_белый_список')) {
+      saveAllowlist([]);
+      return sendMessage(ctx.message.peer_id, '🗑️ Белый список очищен.', keyboard);
+    }
+    
+    // Handle user management commands
+    const userCommands = {
+      '/заблокировать': { action: addToBlocklist, success: '🚫 Добавлен в чёрный список.', exists: '⚠️ Уже в чёрном списке.' },
+      '/разблокировать': { action: removeFromBlocklist, success: '✅ Убран из чёрного списка.', exists: '⚠️ Не найден в чёрном списке.' },
+      '/разрешить': { action: addToAllowlist, success: '✅ Добавлен в белый список.', exists: '⚠️ Уже в белом списке.' },
+      '/запретить': { action: removeFromAllowlist, success: '✅ Убран из белого списка.', exists: '⚠️ Не найден в белом списке.' }
+    };
+    
+    for (const [cmd, config] of Object.entries(userCommands)) {
+      if (text?.startsWith(cmd)) {
+        const args = text.split(' ').slice(1);
+        if (args.length < 1) {
+          return sendMessage(ctx.message.peer_id, `❗ Использование: ${cmd} <id_пользователя>`, keyboard);
+        }
+        try {
+          const result = config.action(args[0]);
+          await sendMessage(ctx.message.peer_id, result ? config.success : config.exists, keyboard);
+        } catch (err) {
+          await sendMessage(ctx.message.peer_id, `❌ Ошибка: ${err.message}`, keyboard);
+        }
+        return;
+      }
+    }
+    
+    // Handle simple commands
+    if (text && commandHandlers[text]) {
+      await commandHandlers[text]();
+    }
+  } catch (error) {
+    console.error('Command error:', error);
+    await sendMessage(ctx.message.peer_id, '❌ Произошла ошибка при выполнении команды.', keyboard);
   }
-});
+};
 
 console.log('🔗 Бот запущен...');
 const app = express();
 app.use(bodyParser.json());
-app.post('/', bot.webhookCallback);
-app.listen(PORT);
+app.post('/', handleWebhook);
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
