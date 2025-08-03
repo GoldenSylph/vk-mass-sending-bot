@@ -106,6 +106,21 @@ const sendMessage = async (peer_id, text, keyboard) => vkApi('messages.send', {
   ...(keyboard && { keyboard: JSON.stringify(keyboard) })
 });
 
+// Check if user allows messages from community
+const canSendMessage = async (user_id) => {
+  try {
+    const response = await vkApi('messages.isMessagesFromGroupAllowed', {
+      group_id: GROUP_ID,
+      user_id: user_id
+    });
+    return response.is_allowed === 1;
+  } catch (error) {
+    // If error occurs, assume we can't send (conservative approach)
+    console.warn(`Can't check message permission for user ${user_id}:`, error.message);
+    return false;
+  }
+};
+
 async function gatherUserIds(group_id) {
   const members = [];
   let offset = 0;
@@ -143,6 +158,7 @@ async function broadcast(messageTemplate, userObjects, dryRun = false) {
   }
 
   let processed = 0;
+  let skipped = 0;
   const total = filteredUsers.length;
 
   for (const user of filteredUsers) {
@@ -154,6 +170,20 @@ async function broadcast(messageTemplate, userObjects, dryRun = false) {
 
     queue.add(async () => {
       try {
+        // Check if user allows messages from community (only for real sending)
+        if (!dryRun) {
+          const canSend = await canSendMessage(user.id);
+          if (!canSend) {
+            skipped++;
+            console.log(`⚠️ Пропущен ${user.id}: пользователь не разрешил сообщения от сообщества`);
+            processed++;
+            if (processed % 10 === 0 || processed === total) {
+              console.log(`📤 Прогресс: ${processed}/${total} обработано (${processed - skipped} отправлено, ${skipped} пропущено)`);
+            }
+            return;
+          }
+        }
+
         if (dryRun) {
           console.log(`[DRY RUN] Отправка ${user.id}: "${personalizedMessage}"`);
         } else {
@@ -161,10 +191,14 @@ async function broadcast(messageTemplate, userObjects, dryRun = false) {
         }
         processed++;
         if (processed % 10 === 0 || processed === total) {
-          console.log(`📤 Прогресс: ${processed}/${total} сообщений ${dryRun ? 'симулируется' : 'отправлено'}`);
+          const statusText = dryRun 
+            ? `📤 Прогресс: ${processed}/${total} сообщений симулируется`
+            : `📤 Прогресс: ${processed}/${total} обработано (${processed - skipped} отправлено, ${skipped} пропущено)`;
+          console.log(statusText);
         }
       } catch (err) {
         console.error(`Ошибка при отправке ${user.id}:`, err);
+        processed++;
         if (err.code === 429 && err.data?.parameters?.retry_after && !dryRun) {
           await new Promise(r => setTimeout(r, err.data.parameters.retry_after * 1000));
           return sendMessage(user.id, personalizedMessage);
@@ -173,6 +207,10 @@ async function broadcast(messageTemplate, userObjects, dryRun = false) {
     });
   }
   await queue.onIdle();
+  
+  if (!dryRun && skipped > 0) {
+    console.log(`📊 Итого: ${processed - skipped} отправлено, ${skipped} пропущено (не разрешили сообщения)`);
+  }
 }
 
 const createKeyboard = () => ({
@@ -286,7 +324,7 @@ const commands = {
   },
 
   async help(ctx) {
-    const helpText = `🤖 Команды VK бота массовой рассылки:
+    const helpText = `🤖 Команды бота массовой рассылки для РО Челябинска партии "Рассвет":
 
 📊 /собрать_айди - Собрать ID участников сообщества
 🔍 /тест_рассылки - Запустить тестовую рассылку (без отправки)
@@ -443,5 +481,5 @@ const app = express();
 app.use(bodyParser.json());
 app.post('/', handleWebhook);
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 Сервер слушает порт: ${PORT}`);
 });
