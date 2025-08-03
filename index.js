@@ -1,237 +1,75 @@
 import dotenv from 'dotenv';
 import express from 'express';
 import bodyParser from 'body-parser';
-dotenv.config();
 import { statSync, readFileSync, writeFileSync, promises } from 'fs';
 import VkBot from 'node-vk-bot-api';
 import PQueue from 'p-queue';
 import Handlebars from 'handlebars';
 
-const SECRET = process.env.SECRET;
-const CONFIRMATION = process.env.CONFIRMATION;
-const PORT = process.env.PORT || 8080;
-const TOKEN = process.env.VK_TOKEN;
-const GROUP_ID = process.env.VK_GROUP_ID;
-const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(Number);
+dotenv.config();
 
-// Validate required environment variables
-if (!TOKEN) {
-  console.error('❌ Переменная окружения VK_TOKEN обязательна');
-  process.exit(1);
-}
+const { SECRET, CONFIRMATION, PORT = 8080, VK_TOKEN: TOKEN, VK_GROUP_ID: GROUP_ID, ADMIN_IDS } = process.env;
+const ADMIN_LIST = (ADMIN_IDS || '').split(',').map(Number).filter(id => !isNaN(id));
 
-if (!GROUP_ID) {
-  console.error('❌ Переменная окружения VK_GROUP_ID обязательна');
-  process.exit(1);
-}
+if (!TOKEN || !GROUP_ID || !ADMIN_LIST.length) process.exit(console.error('❌ Missing VK_TOKEN, VK_GROUP_ID, ADMIN_IDS'));
 
-if (ADMIN_IDS.length === 0 || ADMIN_IDS.every(id => isNaN(id))) {
-  console.error('❌ Переменная окружения ADMIN_IDS должна содержать корректные ID пользователей');
-  process.exit(1);
-}
-
-const bot = new VkBot({
-  token: TOKEN,
-  group_id: Number(GROUP_ID),
-  api: { v: '5.199' },
-  confirmation: CONFIRMATION,
-  secret: SECRET, 
-});
-
-// Add global error handling middleware
-bot.use(async (ctx, next) => {
-  try {
-    await next();
-  } catch (err) {
-    console.error('Bot middleware error:', err);
-  }
-});
-
+const bot = new VkBot({ token: TOKEN, group_id: Number(GROUP_ID), api: { v: '5.199' }, confirmation: CONFIRMATION, secret: SECRET });
 const queue = new PQueue({ intervalCap: 30, interval: 1000 });
+const cache = { blocklist: { data: null, lastModified: 0 }, allowlist: { data: null, lastModified: 0 } };
 
-// Cache for blocklist and allowlist to reduce file I/O
-let blocklistCache = null;
-let allowlistCache = null;
-let blocklistLastModified = 0;
-let allowlistLastModified = 0;
-
-function isAdmin(userId) {
-  return ADMIN_IDS.includes(userId);
-}
-
-function isValidUserId(userId) {
-  const numericId = Number(userId);
-  return !isNaN(numericId) && numericId > 0 && Number.isInteger(numericId);
-}
-
-function loadBlocklist() {
+const isAdmin = userId => ADMIN_LIST.includes(userId);
+const loadList = (file, key) => {
   try {
-    const stats = statSync('./blocklist.json');
-    const lastModified = stats.mtime.getTime();
-    
-    if (blocklistCache && blocklistLastModified >= lastModified) {
-      return blocklistCache;
-    }
-    
-    const data = readFileSync('./blocklist.json', 'utf-8');
-    const parsed = JSON.parse(data);
-    blocklistCache = Array.isArray(parsed) ? parsed : [];
-    blocklistLastModified = lastModified;
-    return blocklistCache;
+    const stats = statSync(file);
+    if (cache[key].data && cache[key].lastModified >= stats.mtime.getTime()) return cache[key].data;
+    const data = JSON.parse(readFileSync(file, 'utf-8'));
+    cache[key].data = Array.isArray(data) ? data : [];
+    cache[key].lastModified = stats.mtime.getTime();
+    return cache[key].data;
   } catch (err) {
-    if (err.code !== 'ENOENT') {
-      console.error('Error loading blocklist:', err.message);
-    }
-    blocklistCache = [];
-    blocklistLastModified = 0;
-    return blocklistCache;
+    cache[key].data = [];
+    return cache[key].data;
   }
-}
-
-function saveBlocklist(blocklist) {
-  try {
-    writeFileSync('./blocklist.json', JSON.stringify(blocklist, null, 2));
-    blocklistCache = blocklist;
-    blocklistLastModified = Date.now();
-  } catch (err) {
-    console.error('Error saving blocklist:', err.message);
-    throw new Error('Failed to save blocklist');
-  }
-}
-
-function addToBlocklist(userId) {
-  if (!isValidUserId(userId)) {
-    throw new Error('Неверный формат ID пользователя');
-  }
-  
-  const blocklist = loadBlocklist();
-  const userIdStr = String(userId);
-  
-  if (!blocklist.includes(userIdStr)) {
-    blocklist.push(userIdStr);
-    saveBlocklist(blocklist);
-    return true;
-  }
+};
+const saveList = (file, key, list) => {
+  writeFileSync(file, JSON.stringify(list, null, 2));
+  cache[key].data = list;
+  cache[key].lastModified = Date.now();
+};
+const modifyList = (file, key, userId, action) => {
+  const list = loadList(file, key);
+  const id = String(userId);
+  const idx = list.indexOf(id);
+  if (action === 'add' && idx === -1) { list.push(id); saveList(file, key, list); return true; }
+  if (action === 'remove' && idx > -1) { list.splice(idx, 1); saveList(file, key, list); return true; }
   return false;
-}
+};
 
-function removeFromBlocklist(userId) {
-  const blocklist = loadBlocklist();
-  const userIdStr = String(userId);
-  const initialLength = blocklist.length;
-  
-  const filteredBlocklist = blocklist.filter(id => id !== userIdStr);
-  
-  if (filteredBlocklist.length < initialLength) {
-    saveBlocklist(filteredBlocklist);
-    return true;
-  }
-  return false;
-}
+const loadBlocklist = () => loadList('./blocklist.json', 'blocklist');
+const loadAllowlist = () => loadList('./allowlist.json', 'allowlist');
+const saveBlocklist = list => saveList('./blocklist.json', 'blocklist', list);
+const saveAllowlist = list => saveList('./allowlist.json', 'allowlist', list);
+const addToBlocklist = userId => modifyList('./blocklist.json', 'blocklist', userId, 'add');
+const removeFromBlocklist = userId => modifyList('./blocklist.json', 'blocklist', userId, 'remove');
+const addToAllowlist = userId => modifyList('./allowlist.json', 'allowlist', userId, 'add');
+const removeFromAllowlist = userId => modifyList('./allowlist.json', 'allowlist', userId, 'remove');
 
-function loadAllowlist() {
-  try {
-    const stats = statSync('./allowlist.json');
-    const lastModified = stats.mtime.getTime();
-    
-    if (allowlistCache && allowlistLastModified >= lastModified) {
-      return allowlistCache;
-    }
-    
-    const data = readFileSync('./allowlist.json', 'utf-8');
-    const parsed = JSON.parse(data);
-    allowlistCache = Array.isArray(parsed) ? parsed : [];
-    allowlistLastModified = lastModified;
-    return allowlistCache;
-  } catch (err) {
-    if (err.code !== 'ENOENT') {
-      console.error('Error loading allowlist:', err.message);
-    }
-    allowlistCache = [];
-    allowlistLastModified = 0;
-    return allowlistCache;
-  }
-}
-
-function saveAllowlist(allowlist) {
-  try {
-    writeFileSync('./allowlist.json', JSON.stringify(allowlist, null, 2));
-    allowlistCache = allowlist;
-    allowlistLastModified = Date.now();
-  } catch (err) {
-    console.error('Error saving allowlist:', err.message);
-    throw new Error('Failed to save allowlist');
-  }
-}
-
-function addToAllowlist(userId) {
-  if (!isValidUserId(userId)) {
-    throw new Error('Неверный формат ID пользователя');
-  }
-  
+const filterUsers = users => {
   const allowlist = loadAllowlist();
-  const userIdStr = String(userId);
-  
-  if (!allowlist.includes(userIdStr)) {
-    allowlist.push(userIdStr);
-    saveAllowlist(allowlist);
-    return true;
-  }
-  return false;
-}
-
-function removeFromAllowlist(userId) {
-  const allowlist = loadAllowlist();
-  const userIdStr = String(userId);
-  const initialLength = allowlist.length;
-  
-  const filteredAllowlist = allowlist.filter(id => id !== userIdStr);
-  
-  if (filteredAllowlist.length < initialLength) {
-    saveAllowlist(filteredAllowlist);
-    return true;
-  }
-  return false;
-}
-
-function filterUsers(users) {
-  const allowlist = loadAllowlist();
-  const blocklist = loadBlocklist();
-  const allowlistSet = new Set(allowlist);
-  const blocklistSet = new Set(blocklist);
-  
+  const blocklist = new Set(loadBlocklist());
+  const allowSet = new Set(allowlist);
   return users.filter(user => {
-    const userIdStr = String(user.id);
-    
-    // If allowlist has entries, only include users in allowlist
-    if (allowlist.length > 0 && !allowlistSet.has(userIdStr)) {
-      return false;
-    }
-    
-    // Filter out blocked users
-    return !blocklistSet.has(userIdStr);
+    const id = String(user.id);
+    return (allowlist.length === 0 || allowSet.has(id)) && !blocklist.has(id);
   });
-}
+};
 
-function generateRandomId(peer_id) {
-  return peer_id * 100000 + (Date.now() % 100000);
-}
-
-async function sendMessage(peer_id, text, keyboard = null) {
-  const attachmentIds = (process.env.ATTACHMENTS || '').trim();
-  const params = {
-    peer_id,
-    message: text,
-    attachment: attachmentIds || undefined,
-    random_id: generateRandomId(peer_id),
-  };
-  
-  if (keyboard) {
-    params.keyboard = JSON.stringify(keyboard);
-  }
-  
-  return bot.api('messages.send', params);
-}
+const sendMessage = async (peer_id, text, keyboard) => bot.api('messages.send', {
+  peer_id, message: text, 
+  attachment: (process.env.ATTACHMENTS || '').trim() || undefined,
+  random_id: peer_id * 100000 + (Date.now() % 100000),
+  ...(keyboard && { keyboard: JSON.stringify(keyboard) })
+});
 
 async function gatherUserIds(group_id) {
   const members = [];
@@ -239,543 +77,273 @@ async function gatherUserIds(group_id) {
   const count = 1000;
   let total = null;
 
-  try {
-    while (true) {
-      const data = await queue.add(() => bot.api('groups.getMembers', {
-        group_id,
-        offset,
-        count,
-        fields: 'first_name,last_name',
-      }));
+  while (true) {
+    const data = await queue.add(() => bot.api('groups.getMembers', {
+      group_id, offset, count, fields: 'first_name,last_name'
+    }));
 
-      if (total === null) total = data.count;
-
-      members.push(...data.items);
-      offset += count;
-
-      console.log(`📊 Собрано ${members.length}/${total} участников...`);
-
-      if (offset >= total) break;
-    }
-
-    await promises.writeFile('./peer_list.json', JSON.stringify(members, null, 4));
-    return members;
-  } catch (err) {
-    console.error('Error gathering user IDs:', err);
-    throw new Error(`Не удалось собрать ID пользователей: ${err.message}`);
+    if (total === null) total = data.count;
+    members.push(...data.items);
+    offset += count;
+    console.log(`📊 Собрано ${members.length}/${total} участников...`);
+    if (offset >= total) break;
   }
+
+  await promises.writeFile('./peer_list.json', JSON.stringify(members, null, 4));
+  return members;
 }
 
 async function broadcast(messageTemplate, userObjects, dryRun = false) {
-  try {
-    const template = Handlebars.compile(messageTemplate);
-    
-    // Filter users based on allowlist and blocklist
-    const originalCount = userObjects.length;
-    const filteredUsers = filterUsers(userObjects);
-    const filteredCount = originalCount - filteredUsers.length;
-    
-    if (filteredCount > 0) {
-      const allowlist = loadAllowlist();
-      const allowlistActive = allowlist.length > 0;
-      
-      if (allowlistActive) {
-        const allowedUsers = userObjects.filter(user => {
-          const allowlist = loadAllowlist();
-          return allowlist.includes(String(user.id));
-        });
-        const notAllowedCount = originalCount - allowedUsers.length;
-        const blockedFromAllowedCount = allowedUsers.length - filteredUsers.length;
-        
-        console.log(`🎯 Белый список активен: ${allowedUsers.length} пользователей разрешено (${notAllowedCount} не в белом списке)`);
-        if (blockedFromAllowedCount > 0) {
-          console.log(`🚫 Исключено ${blockedFromAllowedCount} заблокированных пользователей из разрешённых`);
-        }
-      } else {
-        console.log(`🚫 Исключено ${filteredCount} заблокированных пользователей`);
-      }
+  const template = Handlebars.compile(messageTemplate);
+  const filteredUsers = filterUsers(userObjects);
+  const filteredCount = userObjects.length - filteredUsers.length;
+  
+  if (filteredCount > 0) {
+    const allowlist = loadAllowlist();
+    if (allowlist.length > 0) {
+      console.log(`🎯 Белый список активен: ${filteredUsers.length} пользователей (${filteredCount} исключено)`);
+    } else {
+      console.log(`🚫 Исключено ${filteredCount} заблокированных пользователей`);
     }
-
-    let processed = 0;
-    const total = filteredUsers.length;
-
-    for (const user of filteredUsers) {
-      const personalizedMessage = template({
-        first_name: user.first_name || '',
-        last_name: user.last_name || '',
-        id: user.id,
-      });
-
-      queue.add(async () => {
-        try {
-          if (dryRun) {
-            console.log(`[DRY RUN] Отправка ${user.id}: "${personalizedMessage}"`);
-          } else {
-            await sendMessage(user.id, personalizedMessage);
-          }
-          processed++;
-          if (processed % 10 === 0 || processed === total) {
-            console.log(`📤 Прогресс: ${processed}/${total} сообщений ${dryRun ? 'симулируется' : 'отправлено'}`);
-          }
-        } catch (err) {
-          console.error(`Ошибка при отправке ${user.id}:`, err);
-          if (err.code === 429 && err.data?.parameters?.retry_after) {
-            await new Promise(r => setTimeout(r, err.data.parameters.retry_after * 1000));
-            if (!dryRun) {
-              return sendMessage(user.id, personalizedMessage);
-            }
-          }
-        }
-      });
-    }
-    await queue.onIdle();
-  } catch (err) {
-    console.error('Error in broadcast:', err);
-    throw err;
   }
+
+  let processed = 0;
+  const total = filteredUsers.length;
+
+  for (const user of filteredUsers) {
+    const personalizedMessage = template({
+      first_name: user.first_name || '',
+      last_name: user.last_name || '',
+      id: user.id,
+    });
+
+    queue.add(async () => {
+      try {
+        if (dryRun) {
+          console.log(`[DRY RUN] Отправка ${user.id}: "${personalizedMessage}"`);
+        } else {
+          await sendMessage(user.id, personalizedMessage);
+        }
+        processed++;
+        if (processed % 10 === 0 || processed === total) {
+          console.log(`📤 Прогресс: ${processed}/${total} сообщений ${dryRun ? 'симулируется' : 'отправлено'}`);
+        }
+      } catch (err) {
+        console.error(`Ошибка при отправке ${user.id}:`, err);
+        if (err.code === 429 && err.data?.parameters?.retry_after && !dryRun) {
+          await new Promise(r => setTimeout(r, err.data.parameters.retry_after * 1000));
+          return sendMessage(user.id, personalizedMessage);
+        }
+      }
+    });
+  }
+  await queue.onIdle();
 }
 
-function createAdminKeyboard() {
-  return {
-    one_time: false,
-    buttons: [
-      [
-        {
-          action: {
-            type: "text",
-            label: "📊 Собрать ID",
-            payload: JSON.stringify({ command: "собрать_айди" })
-          },
-          color: "primary"
-        },
-        {
-          action: {
-            type: "text",
-            label: "🔍 Тест рассылки",
-            payload: JSON.stringify({ command: "тест_рассылки" })
-          },
-          color: "secondary"
-        }
-      ],
-      [
-        {
-          action: {
-            type: "text",
-            label: "📡 Рассылка",
-            payload: JSON.stringify({ command: "рассылка" })
-          },
-          color: "positive"
-        },
-        {
-          action: {
-            type: "text",
-            label: "📋 Чёрный список",
-            payload: JSON.stringify({ command: "показать_чёрный_список" })
-          },
-          color: "secondary"
-        }
-      ],
-      [
-        {
-          action: {
-            type: "text",
-            label: "📋 Белый список",
-            payload: JSON.stringify({ command: "показать_белый_список" })
-          },
-          color: "secondary"
-        },
-        {
-          action: {
-            type: "text",
-            label: "❓ Помощь",
-            payload: JSON.stringify({ command: "помощь" })
-          },
-          color: "secondary"
-        }
-      ]
+const createKeyboard = () => ({
+  one_time: false,
+  buttons: [
+    [
+      { action: { type: "text", label: "📊 Собрать ID" }, color: "primary" },
+      { action: { type: "text", label: "🔍 Тест рассылки" }, color: "secondary" }
+    ],
+    [
+      { action: { type: "text", label: "📡 Рассылка" }, color: "positive" },
+      { action: { type: "text", label: "� Чёрный список" }, color: "secondary" }
+    ],
+    [
+      { action: { type: "text", label: "📋 Белый список" }, color: "secondary" },
+      { action: { type: "text", label: "❓ Помощь" }, color: "secondary" }
     ]
-  };
-}
+  ]
+});
+
+// Command handlers
+const commands = {
+  async gatherIds(ctx) {
+    const keyboard = createKeyboard();
+    await sendMessage(ctx.message.peer_id, '⏳ Собираем ID участников сообщества…', keyboard);
+    try {
+      const members = await gatherUserIds(GROUP_ID);
+      await sendMessage(ctx.message.peer_id, `✅ Собрано ${members.length} ID пользователей.`, keyboard);
+    } catch (err) {
+      console.error(err);
+      await sendMessage(ctx.message.peer_id, '❌ Не удалось собрать ID участников.', keyboard);
+    }
+  },
+
+  async testBroadcast(ctx) {
+    const keyboard = createKeyboard();
+    await sendMessage(ctx.message.peer_id, '🔍 Запускаем тестовую рассылку (без отправки)…', keyboard);
+
+    try {
+      const users = await gatherUserIds(GROUP_ID);
+      
+      let templateContent;
+      try {
+        templateContent = readFileSync('./broadcast_template.txt', 'utf-8').trim();
+      } catch (err) {
+        return sendMessage(ctx.message.peer_id, '❗ Не удалось прочитать файл broadcast_template.txt.', keyboard);
+      }
+      
+      if (!templateContent) return sendMessage(ctx.message.peer_id, '❗ Файл шаблона пуст.', keyboard);
+
+      const filteredUsers = filterUsers(users);
+      const blockedCount = users.length - filteredUsers.length;
+      if (blockedCount > 0) {
+        await sendMessage(ctx.message.peer_id, `� Тестируем с ${filteredUsers.length} пользователями (${blockedCount} исключено)`, keyboard);
+      }
+
+      await broadcast(templateContent, users, true);
+      await sendMessage(ctx.message.peer_id, '✅ Тестовая рассылка завершена (реальные сообщения не отправлялись).', keyboard);
+    } catch (err) {
+      console.error(err);
+      await sendMessage(ctx.message.peer_id, '❌ Тестовая рассылка не удалась: ' + err.message, keyboard);
+    }
+  },
+
+  async broadcast(ctx) {
+    const keyboard = createKeyboard();
+    await sendMessage(ctx.message.peer_id, '📡 Обновляем список получателей…', keyboard);
+
+    try {
+      const users = await gatherUserIds(GROUP_ID);
+      
+      let templateContent;
+      try {
+        templateContent = readFileSync('./broadcast_template.txt', 'utf-8').trim();
+      } catch (err) {
+        return sendMessage(ctx.message.peer_id, '❗ Не удалось прочитать файл broadcast_template.txt.', keyboard);
+      }
+      
+      if (!templateContent) return sendMessage(ctx.message.peer_id, '❗ Файл шаблона пуст.', keyboard);
+
+      const filteredUsers = filterUsers(users);
+      const blockedCount = users.length - filteredUsers.length;
+      
+      const statusMessage = blockedCount > 0 
+        ? `📬 Отправляем ${filteredUsers.length} пользователям (${blockedCount} исключено)`
+        : `📬 Отправляем ${filteredUsers.length} пользователям`;
+      
+      await sendMessage(ctx.message.peer_id, statusMessage, keyboard);
+      await broadcast(templateContent, users);
+      await sendMessage(ctx.message.peer_id, '✅ Рассылка завершена.', keyboard);
+    } catch (err) {
+      console.error(err);
+      await sendMessage(ctx.message.peer_id, '❌ Рассылка не удалась: ' + err.message, keyboard);
+    }
+  },
+
+  async showList(ctx, listType) {
+    const keyboard = createKeyboard();
+    const list = listType === 'blocklist' ? loadBlocklist() : loadAllowlist();
+    const listName = listType === 'blocklist' ? 'Чёрный' : 'Белый';
+    const emptyMessage = listType === 'blocklist' 
+      ? '📋 Чёрный список пуст.' 
+      : '📋 Белый список пуст (все пользователи разрешены кроме заблокированных).';
+    
+    if (list.length === 0) {
+      return sendMessage(ctx.message.peer_id, emptyMessage, keyboard);
+    }
+
+    const listText = list.map((userId, index) => `${index + 1}. ${userId}`).join('\n');
+    await sendMessage(ctx.message.peer_id, `📋 ${listName} список (${list.length}):\n${listText}`, keyboard);
+  },
+
+  async help(ctx) {
+    const helpText = `🤖 Команды VK бота массовой рассылки:
+
+📊 /собрать_айди - Собрать ID участников сообщества
+🔍 /тест_рассылки - Запустить тестовую рассылку (без отправки)
+📡 /рассылка - Отправить рассылку всем пользователям
+📋 /показать_чёрный_список - Показать заблокированных пользователей
+📋 /показать_белый_список - Показать разрешённых пользователей
+🗑️ /очистить_чёрный_список - Очистить чёрный список
+🗑️ /очистить_белый_список - Очистить белый список
+🚫 /заблокировать <id> - Заблокировать пользователя
+✅ /разблокировать <id> - Разблокировать пользователя
+✅ /разрешить <id> - Добавить в белый список
+❌ /запретить <id> - Убрать из белого списка
+
+Переменные шаблона: {{first_name}}, {{last_name}}, {{id}}`;
+
+    await sendMessage(ctx.message.peer_id, helpText, createKeyboard());
+  }
+};
+
+// Bot handlers  
+bot.use(async (ctx, next) => { try { await next(); } catch (err) { console.error('Bot error:', err); } });
 
 bot.command('/начать', async ctx => {
   if (!isAdmin(ctx.message.from_id)) {
-    const adminLinks = ADMIN_IDS.map(id => `[id${id}|Админ]`).join(', ');
-    return ctx.reply(`⚠️ Этот бот только для администраторов.\n\nОбратитесь к админам: ${adminLinks}`);
+    return ctx.reply(`⚠️ Этот бот только для администраторов.\n\nОбратитесь к админам: ${ADMIN_LIST.map(id => `[id${id}|Админ]`).join(', ')}`);
   }
-  
-  const keyboard = createAdminKeyboard();
-  await sendMessage(ctx.message.peer_id, '🤖 VK Бот массовой рассылки\n\nИспользуйте кнопки ниже для выполнения команд:', keyboard);
+  await sendMessage(ctx.message.peer_id, '🤖 VK Бот массовой рассылки\n\nИспользуйте кнопки ниже для выполнения команд:', createKeyboard());
 });
 
-bot.command('/помощь', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    const adminLinks = ADMIN_IDS.map(id => `[id${id}|Админ]`).join(', ');
-    return ctx.reply(`⚠️ Этот бот только для администраторов.\n\nОбратитесь к админам: ${adminLinks}`);
+// Command mapping
+const commandMap = {
+  '/помощь': () => commands.help, '/собрать_айди': () => commands.gatherIds, '/рассылка': () => commands.broadcast,
+  '/тест_рассылки': () => commands.testBroadcast, '/показать_чёрный_список': () => commands.showList,
+  '/показать_белый_список': () => commands.showList, '📊 Собрать ID': () => commands.gatherIds,
+  '🔍 Тест рассылки': () => commands.testBroadcast, '📡 Рассылка': () => commands.broadcast,
+  '📋 Чёрный список': () => commands.showList, '📋 Белый список': () => commands.showList, '❓ Помощь': () => commands.help
+};
+
+Object.keys(commandMap).forEach(cmd => {
+  if (cmd.startsWith('/')) {
+    bot.command(cmd, async ctx => {
+      if (!isAdmin(ctx.message.from_id)) return ctx.reply('⚠️ Доступ запрещён.');
+      const handler = commandMap[cmd]();
+      if (cmd.includes('белый')) await handler(ctx, 'allowlist');
+      else if (cmd.includes('чёрный')) await handler(ctx, 'blocklist');
+      else await handler(ctx);
+    });
   }
-  
-  const helpText = `🤖 Команды VK бота массовой рассылки:
-
-📊 /собрать_айди - Собрать ID участников сообщества
-🔍 /тест_рассылки - Запустить тестовую рассылку (без отправки)
-📡 /рассылка - Отправить рассылку всем пользователям
-📋 /показать_чёрный_список - Показать заблокированных пользователей
-📋 /показать_белый_список - Показать разрешённых пользователей
-🗑️ /очистить_чёрный_список - Очистить чёрный список
-🗑️ /очистить_белый_список - Очистить белый список (разрешить всех)
-🚫 /заблокировать <id> - Заблокировать пользователя
-✅ /разблокировать <id> - Разблокировать пользователя
-✅ /разрешить <id> - Добавить пользователя в белый список
-❌ /запретить <id> - Убрать пользователя из белого списка
-
-Переменные шаблона: {{first_name}}, {{last_name}}, {{id}}`;
-
-  const keyboard = createAdminKeyboard();
-  await sendMessage(ctx.message.peer_id, helpText, keyboard);
 });
 
-// Handle button presses
+// List management
+[
+  { cmd: '/очистить_чёрный_список', action: () => saveBlocklist([]), msg: '🗑️ Чёрный список очищен.' },
+  { cmd: '/очистить_белый_список', action: () => saveAllowlist([]), msg: '🗑️ Белый список очищен.' },
+  { cmd: '/заблокировать', action: addToBlocklist, success: '🚫 Добавлен в чёрный список.', exists: '⚠️ Уже в чёрном списке.' },
+  { cmd: '/разблокировать', action: removeFromBlocklist, success: '✅ Убран из чёрного списка.', exists: '⚠️ Не найден в чёрном списке.' },
+  { cmd: '/разрешить', action: addToAllowlist, success: '✅ Добавлен в белый список.', exists: '⚠️ Уже в белом списке.' },
+  { cmd: '/запретить', action: removeFromAllowlist, success: '✅ Убран из белого списка.', exists: '⚠️ Не найден в белом списке.' }
+].forEach(({ cmd, action, msg, success, exists }) => {
+  bot.command(cmd, async ctx => {
+    if (!isAdmin(ctx.message.from_id)) return ctx.reply('⚠️ Доступ запрещён.');
+    const keyboard = createKeyboard();
+    if (msg) { action(); return sendMessage(ctx.message.peer_id, msg, keyboard); }
+    const args = ctx.message.text.split(' ').slice(1);
+    if (args.length < 1) return sendMessage(ctx.message.peer_id, `❗ Использование: ${cmd} <id_пользователя>`, keyboard);
+    try {
+      const result = action(args[0]);
+      await sendMessage(ctx.message.peer_id, result ? success : exists, keyboard);
+    } catch (err) {
+      await sendMessage(ctx.message.peer_id, `❌ Ошибка: ${err.message}`, keyboard);
+    }
+  });
+});
+
 bot.on('message', async ctx => {
   if (!isAdmin(ctx.message.from_id)) {
-    // Forward non-admin messages to all admins
     if (ctx.message.text && !ctx.message.text.startsWith('/')) {
       const senderInfo = `[id${ctx.message.from_id}|Пользователь ${ctx.message.from_id}]`;
       const forwardMessage = `📨 Сообщение от ${senderInfo}:\n\n"${ctx.message.text}"`;
-      
-      // Send to all admins
-      for (const adminId of ADMIN_IDS) {
-        try {
-          await sendMessage(adminId, forwardMessage);
-        } catch (err) {
-          console.error(`Не удалось переслать сообщение админу ${adminId}:`, err);
-        }
+      for (const adminId of ADMIN_LIST) {
+        try { await sendMessage(adminId, forwardMessage); } catch (err) { console.error(`Failed to forward to ${adminId}:`, err); }
       }
-      
-      // Confirm to sender
-      const adminLinks = ADMIN_IDS.map(id => `[id${id}|Админ]`).join(', ');
-      return ctx.reply(`✅ Ваше сообщение переслано администраторам: ${adminLinks}\n\nОни ответят вам напрямую при первой возможности!`);
+      return ctx.reply(`✅ Ваше сообщение переслано администраторам: ${ADMIN_LIST.map(id => `[id${id}|Админ]`).join(', ')}`);
     }
     return;
   }
-  
-  // Check if message contains payload (button press)
-  if (ctx.message.payload) {
-    try {
-      const payload = JSON.parse(ctx.message.payload);
-      const command = payload.command;
-      
-      // Execute the corresponding command directly
-      switch (command) {
-        case 'собрать_айди':
-          return await executeGatherIds(ctx);
-        case 'тест_рассылки':
-          return await executeTestBroadcast(ctx);
-        case 'рассылка':
-          return await executeBroadcast(ctx);
-        case 'показать_чёрный_список':
-          return await executeShowBlocklist(ctx);
-        case 'показать_белый_список':
-          return await executeShowAllowlist(ctx);
-        case 'помощь':
-          return await executeHelp(ctx);
-        default:
-          return;
-      }
-    } catch (err) {
-      console.error('Error parsing button payload:', err);
-    }
-  }
-  
-  // Handle text button labels as commands
   const text = ctx.message.text?.trim();
-  if (text) {
-    switch (text) {
-      case '📊 Собрать ID':
-        return await executeGatherIds(ctx);
-      case '🔍 Тест рассылки':
-        return await executeTestBroadcast(ctx);
-      case '📡 Рассылка':
-        return await executeBroadcast(ctx);
-      case '📋 Чёрный список':
-        return await executeShowBlocklist(ctx);
-      case '📋 Белый список':
-        return await executeShowAllowlist(ctx);
-      case '❓ Помощь':
-        return await executeHelp(ctx);
-    }
-  }
-});
-
-// Extract command logic into separate functions
-async function executeGatherIds(ctx) {
-  const keyboard = createAdminKeyboard();
-  await sendMessage(ctx.message.peer_id, '⏳ Собираем ID участников сообщества…', keyboard);
-  try {
-    const members = await gatherUserIds(GROUP_ID);
-    await sendMessage(ctx.message.peer_id, `✅ Собрано ${members.length} ID пользователей.`, keyboard);
-  } catch (err) {
-    console.error(err);
-    await sendMessage(ctx.message.peer_id, '❌ Не удалось собрать ID участников.', keyboard);
-  }
-}
-
-async function executeTestBroadcast(ctx) {
-  const keyboard = createAdminKeyboard();
-  await sendMessage(ctx.message.peer_id, '🔍 Запускаем тестовую рассылку (без отправки)…', keyboard);
-
-  try {
-    const users = await gatherUserIds(GROUP_ID);
-    
-    let templateContent;
-    try {
-      templateContent = readFileSync('./broadcast_template.txt', 'utf-8').trim();
-    } catch (err) {
-      return sendMessage(ctx.message.peer_id, '❗ Не удалось прочитать файл broadcast_template.txt.', keyboard);
-    }
-    
-    if (!templateContent) return sendMessage(ctx.message.peer_id, '❗ Файл шаблона пуст.', keyboard);
-
-    const filteredUsers = filterUsers(users);
-    const allowlist = loadAllowlist();
-    const allowlistActive = allowlist.length > 0;
-
-    if (allowlistActive) {
-      const allowedUsers = users.filter(user => allowlist.includes(String(user.id)));
-      const blockedFromAllowedCount = allowedUsers.length - filteredUsers.length;
-      await sendMessage(ctx.message.peer_id, `🔍 Тестируем с ${filteredUsers.length} пользователями (белый список: ${allowedUsers.length}, заблокировано: ${blockedFromAllowedCount})`, keyboard);
-    } else {
-      const blockedCount = users.length - filteredUsers.length;
-      if (blockedCount > 0) {
-        await sendMessage(ctx.message.peer_id, `🔍 Тестируем с ${filteredUsers.length} пользователями (${blockedCount} заблокированных пользователей исключено)`, keyboard);
-      }
-    }
-
-    await broadcast(templateContent, users, true);
-    await sendMessage(ctx.message.peer_id, '✅ Тестовая рассылка завершена (реальные сообщения не отправлялись).', keyboard);
-  } catch (err) {
-    console.error(err);
-    await sendMessage(ctx.message.peer_id, '❌ Тестовая рассылка не удалась: ' + err.message, keyboard);
-  }
-}
-
-async function executeBroadcast(ctx) {
-  const keyboard = createAdminKeyboard();
-  await sendMessage(ctx.message.peer_id, '📡 Обновляем список получателей…', keyboard);
-
-  try {
-    const users = await gatherUserIds(GROUP_ID);
-    
-    let templateContent;
-    try {
-      templateContent = readFileSync('./broadcast_template.txt', 'utf-8').trim();
-    } catch (err) {
-      return sendMessage(ctx.message.peer_id, '❗ Не удалось прочитать файл broadcast_template.txt.', keyboard);
-    }
-    
-    if (!templateContent) return sendMessage(ctx.message.peer_id, '❗ Файл шаблона пуст.', keyboard);
-
-    const filteredUsers = filterUsers(users);
-    const allowlist = loadAllowlist();
-    const allowlistActive = allowlist.length > 0;
-
-    let statusMessage = '';
-    if (allowlistActive) {
-      const allowedUsers = users.filter(user => allowlist.includes(String(user.id)));
-      const notAllowedCount = users.length - allowedUsers.length;
-      const blockedFromAllowedCount = allowedUsers.length - filteredUsers.length;
-      
-      statusMessage = `📬 Отправляем ${filteredUsers.length} пользователям (белый список: ${allowedUsers.length}, заблокировано: ${blockedFromAllowedCount})`;
-    } else {
-      const blockedCount = users.length - filteredUsers.length;
-      if (blockedCount > 0) {
-        statusMessage = `📬 Отправляем ${filteredUsers.length} пользователям (${blockedCount} заблокированных пользователей исключено)`;
-      } else {
-        statusMessage = `📬 Отправляем ${filteredUsers.length} пользователям`;
-      }
-    }
-    
-    await sendMessage(ctx.message.peer_id, statusMessage, keyboard);
-    await broadcast(templateContent, users);
-    await sendMessage(ctx.message.peer_id, '✅ Рассылка завершена.', keyboard);
-  } catch (err) {
-    console.error(err);
-    await sendMessage(ctx.message.peer_id, '❌ Рассылка не удалась: ' + err.message, keyboard);
-  }
-}
-
-async function executeShowBlocklist(ctx) {
-  const keyboard = createAdminKeyboard();
-  const blocklist = loadBlocklist();
-  
-  if (blocklist.length === 0) {
-    return sendMessage(ctx.message.peer_id, '📋 Чёрный список пуст.', keyboard);
-  }
-
-  const blocklistText = blocklist
-    .map((userId, index) => `${index + 1}. ${userId}`)
-    .join('\n');
-
-  await sendMessage(ctx.message.peer_id, `📋 Заблокированные пользователи (${blocklist.length}):\n${blocklistText}`, keyboard);
-}
-
-async function executeShowAllowlist(ctx) {
-  const keyboard = createAdminKeyboard();
-  const allowlist = loadAllowlist();
-  
-  if (allowlist.length === 0) {
-    return sendMessage(ctx.message.peer_id, '📋 Белый список пуст (все пользователи разрешены кроме заблокированных).', keyboard);
-  }
-
-  const allowlistText = allowlist
-    .map((userId, index) => `${index + 1}. ${userId}`)
-    .join('\n');
-
-  await sendMessage(ctx.message.peer_id, `📋 Разрешённые пользователи (${allowlist.length}):\n${allowlistText}`, keyboard);
-}
-
-async function executeHelp(ctx) {
-  const helpText = `🤖 Команды VK бота массовой рассылки:
-
-📊 /собрать_айди - Собрать ID участников сообщества
-🔍 /тест_рассылки - Запустить тестовую рассылку (без отправки)
-📡 /рассылка - Отправить рассылку всем пользователям
-📋 /показать_чёрный_список - Показать заблокированных пользователей
-📋 /показать_белый_список - Показать разрешённых пользователей
-🗑️ /очистить_чёрный_список - Очистить чёрный список
-🗑️ /очистить_белый_список - Очистить белый список (разрешить всех)
-🚫 /заблокировать <id> - Заблокировать пользователя
-✅ /разблокировать <id> - Разблокировать пользователя
-✅ /разрешить <id> - Добавить пользователя в белый список
-❌ /запретить <id> - Убрать пользователя из белого списка
-
-Переменные шаблона: {{first_name}}, {{last_name}}, {{id}}`;
-
-  const keyboard = createAdminKeyboard();
-  await sendMessage(ctx.message.peer_id, helpText, keyboard);
-}
-
-bot.command('/собрать_айди', executeGatherIds);
-
-bot.command('/рассылка', executeBroadcast);
-
-bot.command('/тест_рассылки', executeTestBroadcast);
-
-bot.command('/показать_чёрный_список', executeShowBlocklist);
-
-bot.command('/очистить_чёрный_список', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
-  const keyboard = createAdminKeyboard();
-  saveBlocklist([]);
-  await sendMessage(ctx.message.peer_id, '🗑️ Чёрный список очищен.', keyboard);
-});
-
-bot.command('/разрешить', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
-  const keyboard = createAdminKeyboard();
-  const args = ctx.message.text.split(' ').slice(1);
-  if (args.length < 1) {
-    return sendMessage(ctx.message.peer_id, '❗ Использование: /разрешить <id_пользователя>', keyboard);
-  }
-
-  const userId = args[0];
-
-  try {
-    if (addToAllowlist(userId)) {
-      await sendMessage(ctx.message.peer_id, `✅ Добавлен ID пользователя "${userId}" в белый список.`, keyboard);
-    } else {
-      await sendMessage(ctx.message.peer_id, `⚠️ ID пользователя "${userId}" уже в белом списке.`, keyboard);
-    }
-  } catch (err) {
-    await sendMessage(ctx.message.peer_id, `❌ Ошибка: ${err.message}`, keyboard);
-  }
-});
-
-bot.command('/запретить', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
-  const keyboard = createAdminKeyboard();
-  const args = ctx.message.text.split(' ').slice(1);
-  if (args.length < 1) {
-    return sendMessage(ctx.message.peer_id, '❗ Использование: /запретить <id_пользователя>', keyboard);
-  }
-
-  const userId = args[0];
-
-  try {
-    if (removeFromAllowlist(userId)) {
-      await sendMessage(ctx.message.peer_id, `✅ Убран ID пользователя "${userId}" из белого списка.`, keyboard);
-    } else {
-      await sendMessage(ctx.message.peer_id, `⚠️ ID пользователя "${userId}" не найден в белом списке.`, keyboard);
-    }
-  } catch (err) {
-    await sendMessage(ctx.message.peer_id, `❌ Ошибка: ${err.message}`, keyboard);
-  }
-});
-
-bot.command('/показать_белый_список', executeShowAllowlist);
-
-bot.command('/очистить_белый_список', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
-  const keyboard = createAdminKeyboard();
-  saveAllowlist([]);
-  await sendMessage(ctx.message.peer_id, '🗑️ Белый список очищен (теперь все пользователи разрешены кроме заблокированных).', keyboard);
-});
-
-bot.command('/заблокировать', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
-  const keyboard = createAdminKeyboard();
-  const args = ctx.message.text.split(' ').slice(1);
-  if (args.length < 1) {
-    return sendMessage(ctx.message.peer_id, '❗ Использование: /заблокировать <id_пользователя>', keyboard);
-  }
-
-  const userId = args[0];
-
-  try {
-    if (addToBlocklist(userId)) {
-      await sendMessage(ctx.message.peer_id, `🚫 Добавлен ID пользователя "${userId}" в чёрный список.`, keyboard);
-    } else {
-      await sendMessage(ctx.message.peer_id, `⚠️ ID пользователя "${userId}" уже в чёрном списке.`, keyboard);
-    }
-  } catch (err) {
-    await sendMessage(ctx.message.peer_id, `❌ Ошибка: ${err.message}`, keyboard);
-  }
-});
-
-bot.command('/разблокировать', async ctx => {
-  if (!isAdmin(ctx.message.from_id)) {
-    return ctx.reply('⚠️ Доступ запрещён.');
-  }
-
-  const keyboard = createAdminKeyboard();
-  const args = ctx.message.text.split(' ').slice(1);
-  if (args.length < 1) {
-    return sendMessage(ctx.message.peer_id, '❗ Использование: /разблокировать <id_пользователя>', keyboard);
-  }
-
-  const userId = args[0];
-
-  try {
-    if (removeFromBlocklist(userId)) {
-      await sendMessage(ctx.message.peer_id, `✅ Убран ID пользователя "${userId}" из чёрного списка.`, keyboard);
-    } else {
-      await sendMessage(ctx.message.peer_id, `⚠️ ID пользователя "${userId}" не найден в чёрном списке.`, keyboard);
-    }
-  } catch (err) {
-    await sendMessage(ctx.message.peer_id, `❌ Ошибка: ${err.message}`, keyboard);
+  if (text && commandMap[text]) {
+    const handler = commandMap[text]();
+    if (text.includes('Белый')) await handler(ctx, 'allowlist');
+    else if (text.includes('Чёрный')) await handler(ctx, 'blocklist');
+    else await handler(ctx);
   }
 });
 
