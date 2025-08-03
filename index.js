@@ -108,10 +108,10 @@ const filterUsers = users => {
   });
 };
 
-const sendMessage = async (peer_id, text, keyboard) => vkApi('messages.send', {
+const sendMessage = async (peer_id, text, keyboard, dryRun = false) => vkApi('messages.send', {
   peer_id, 
   message: text, 
-  attachment: (process.env.ATTACHMENTS || '').trim() || undefined,
+  attachment: (!dryRun && (process.env.ATTACHMENTS || '').trim()) || undefined,
   random_id: peer_id * 100000 + (Date.now() % 100000),
   ...(keyboard && { keyboard: JSON.stringify(keyboard) })
 });
@@ -225,9 +225,11 @@ async function sendBroadcast(messageTemplate, userObjects, dryRun = false) {
         }
 
         if (dryRun) {
-          console.log(`[DRY RUN] Отправка ${user.id}: "${personalizedMessage.slice(0, 30)}..."\n${JSON.stringify(user, null, 2)}\n[DRY RUN]`);
+          const attachments = (process.env.ATTACHMENTS || '').trim();
+          const attachmentInfo = attachments ? `\nВложения: ${attachments}` : '\nВложения: нет';
+          console.log(`[DRY RUN] Отправка ${user.id}: "${personalizedMessage.slice(0, 30)}..."${attachmentInfo}\n${JSON.stringify(user, null, 2)}\n[DRY RUN]`);
         } else {
-          await sendMessage(user.id, personalizedMessage);
+          await sendMessage(user.id, personalizedMessage, null, dryRun);
         }
         processed++;
         if (processed % 10 === 0 || processed === total) {
@@ -241,7 +243,7 @@ async function sendBroadcast(messageTemplate, userObjects, dryRun = false) {
         processed++;
         if (err.code === 429 && err.data?.parameters?.retry_after && !dryRun) {
           await new Promise(r => setTimeout(r, err.data.parameters.retry_after * 1000));
-          return sendMessage(user.id, personalizedMessage);
+          return sendMessage(user.id, personalizedMessage, null, dryRun);
         }
       }
     });
