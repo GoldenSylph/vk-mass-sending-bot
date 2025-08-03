@@ -843,12 +843,4 @@ console.log('🔗 Бот запущен...');
 const app = express();
 app.use(bodyParser.json());
 app.post('/', bot.webhookCallback);
-
-// Add polling error handling
-bot.startPolling((err) => {
-  if (err) {
-    console.error('Polling error:', err);
-  }
-});
-
 app.listen(PORT);
