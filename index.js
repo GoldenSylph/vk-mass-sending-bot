@@ -121,6 +121,36 @@ const canSendMessage = async (user_id) => {
   }
 };
 
+// Resolve user IDs to names
+const resolveUserNames = async (userIds) => {
+  if (userIds.length === 0) return {};
+  
+  try {
+    // VK API allows up to 1000 IDs per request
+    const chunks = [];
+    for (let i = 0; i < userIds.length; i += 1000) {
+      chunks.push(userIds.slice(i, i + 1000));
+    }
+    
+    const resolved = {};
+    for (const chunk of chunks) {
+      const response = await vkApi('users.get', {
+        user_ids: chunk.join(','),
+        fields: 'first_name,last_name'
+      });
+      
+      response.forEach(user => {
+        resolved[user.id] = `${user.first_name} ${user.last_name}`;
+      });
+    }
+    
+    return resolved;
+  } catch (error) {
+    console.warn('Failed to resolve user names:', error.message);
+    return {};
+  }
+};
+
 async function gatherUserIds(group_id) {
   const members = [];
   let offset = 0;
@@ -319,7 +349,13 @@ const commands = {
       return sendMessage(ctx.message.peer_id, emptyMessage, keyboard);
     }
 
-    const listText = list.map((userId, index) => `${index + 1}. ${userId}`).join('\n');
+    // Resolve user names for better readability
+    const userNames = await resolveUserNames(list);
+    const listText = list.map((userId, index) => {
+      const userName = userNames[userId];
+      return userName ? `${index + 1}. ${userName} (${userId})` : `${index + 1}. ${userId}`;
+    }).join('\n');
+    
     await sendMessage(ctx.message.peer_id, `📋 ${listName} список (${list.length}):\n${listText}`, keyboard);
   },
 
