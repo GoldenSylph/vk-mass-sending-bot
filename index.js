@@ -11,7 +11,7 @@ dotenv.config();
 const { SECRET, CONFIRMATION, PORT = 8080, VK_TOKEN: token, VK_GROUP_ID: groupId, ADMIN_IDS: adminIds } = process.env;
 const adminList = (adminIds || '').split(',').map(Number).filter(id => !isNaN(id));
 
-if (!token || !groupId || !adminList.length) process.exit(console.error('❌ Missing VK_TOKEN, VK_GROUP_ID, ADMIN_IDS'));
+if (!token || !groupId || !adminList.length) process.exit(console.error('❌ Отсутствуют VK_TOKEN, VK_GROUP_ID, ADMIN_IDS'));
 
 const VK_API_URL = 'https://api.vk.com/method';
 const API_VERSION = '5.199';
@@ -21,7 +21,7 @@ const keyboard = {
   one_time: false,
   buttons: [
     [
-      { action: { type: "text", label: "🔍 Тест рассылки" }, color: "secondary" },
+      { action: { type: "text", label: "🔍 Тест рассылки" }, color: "primary" },
       { action: { type: "text", label: "📡 Рассылка" }, color: "positive" }
     ],
     [
@@ -55,7 +55,6 @@ const vkApi = async (method, params = {}) => {
       error.data = response.data.error;
       throw error;
     }
-    
     return response.data.response;
   });
 };
@@ -79,28 +78,35 @@ const filterUsers = users => {
   });
 };
 
-const sendMessage = async (peer_id, text, withKeyboard = true) => vkApi('messages.send', {
-  peer_id, 
-  message: text, 
-  random_id: peer_id * 100000 + (Date.now() % 100000),
-  ...(withKeyboard && { keyboard: JSON.stringify(keyboard) })
-});
+const sendMessage = async (peer_id, text, withKeyboard = true) => {
+  await vkApi('messages.send', {
+    peer_id, 
+    message: text, 
+    random_id: peer_id * 100000 + (Date.now() % 100000),
+    ...(withKeyboard && { keyboard: JSON.stringify(keyboard) })
+  });
+  await queue.onIdle();
+};
 
-const sendBroadcastMessage = async (peer_id, text) => vkApi('messages.send', {
-  peer_id, 
-  message: text, 
-  attachment: (process.env.ATTACHMENTS || '').trim() || undefined,
-  random_id: peer_id * 100000 + (Date.now() % 100000)
-});
+const sendBroadcastMessage = async (peer_id, text) => {
+  await vkApi('messages.send', {
+    peer_id, 
+    message: text, 
+    attachment: (process.env.ATTACHMENTS || '').trim() || undefined,
+    random_id: peer_id * 100000 + (Date.now() % 100000)
+  });
+  await queue.onIdle();
+};
 
 const canSendMessage = async (userId) => {
   try {
     const response = await vkApi('messages.isMessagesFromGroupAllowed', {
       group_id: groupId, user_id: userId
     });
+    await queue.onIdle();
     return response.is_allowed === 1;
   } catch (error) {
-    console.warn(`Can't check message permission for user ${userId}:`, error.message);
+    console.warn(`Невозможно проверить разрешение на сообщения для пользователя ${userId}:`, error.message);
     return false;
   }
 };
@@ -125,7 +131,7 @@ const resolveUserNames = async (userIds) => {
     await queue.onIdle();
     return resolved;
   } catch (error) {
-    console.warn('Failed to resolve user names:', error.message);
+    console.warn('Не удалось получить имена пользователей:', error.message);
     return {};
   }
 };
@@ -216,8 +222,6 @@ async function sendBroadcast(messageTemplate, userObjects, dryRun = false) {
       }
     }
   }
-  
-  await queue.onIdle();
   
   if (!dryRun && skipped > 0) {
     console.log(`📊 Итого: ${processed - skipped} отправлено, ${skipped} пропущено (не разрешили сообщения)`);
@@ -340,13 +344,13 @@ const handleMessage = async (message) => {
         try { 
           await sendMessage(adminId, forwardMessage, false); 
         } catch (err) { 
-          console.error(`Failed to forward to ${adminId}:`, err); 
+          console.error(`Не удалось переслать сообщение администратору ${adminId}:`, err); 
         }
       }
       return sendMessage(message.peer_id, `✅ Ваше сообщение переслано администраторам: ${adminList.map(id => `[id${id}|Админ]`).join(', ')}`, false);
     }
   } catch (error) {
-    console.error('Error handling message:', error);
+    console.error('Ошибка при обработке сообщения:', error);
   }
 };
 
@@ -361,7 +365,7 @@ const handleWebhook = async (req, res) => {
     
     res.send('ok');
   } catch (error) {
-    console.error('Webhook error:', error);
+    console.error('Ошибка webhook:', error);
     res.status(500).send('Internal Server Error');
   }
 };
@@ -370,4 +374,4 @@ console.log('🔗 Бот запущен...');
 const app = express();
 app.use(bodyParser.json());
 app.post('/', handleWebhook);
-app.listen(PORT, () => console.log(`🚀 Сервер слушает порт: ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Сервер запущен на порту: ${PORT}`));
