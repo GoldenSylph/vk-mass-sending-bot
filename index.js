@@ -167,7 +167,18 @@ const resolveUserNames = async (userIds) => {
   }
 };
 
-async function getUserIds(groupId) {
+async function getUserIds(groupId, forceRefresh = false) {
+  // Try to load from cache first unless forced refresh
+  if (!forceRefresh) {
+    try {
+      const cached = JSON.parse(readFileSync('./peer_list.json', 'utf-8'));
+      console.log(`📋 Загружено ${cached.length} участников из кэша`);
+      return cached;
+    } catch (err) {
+      console.log('📋 Кэш не найден, загружаем свежие данные...');
+    }
+  }
+
   const members = [];
   let offset = 0;
   const count = 1000;
@@ -285,7 +296,7 @@ const commands = {
     const keyboard = createKeyboard();
     await sendMessage(ctx.message.peer_id, '⏳ Собираем ID участников сообщества…', keyboard);
     try {
-      const members = await getUserIds(groupId);
+      const members = await getUserIds(groupId, true); // Force refresh for manual collection
       await sendMessage(ctx.message.peer_id, `✅ Собрано ${members.length} ID пользователей.`, keyboard);
     } catch (err) {
       console.error(err);
@@ -298,7 +309,7 @@ const commands = {
     await sendMessage(ctx.message.peer_id, '🔍 Запускаем тестовую рассылку (без отправки)…', keyboard);
 
     try {
-      const users = await getUserIds(groupId);
+      const users = await getUserIds(groupId, false); // Use cache for tests
       
       let templateContent;
       try {
@@ -328,7 +339,7 @@ const commands = {
     await sendMessage(ctx.message.peer_id, '📡 Обновляем список получателей…', keyboard);
 
     try {
-      const users = await getUserIds(groupId);
+      const users = await getUserIds(groupId, true); // Force refresh for real broadcasts
       
       let templateContent;
       try {
