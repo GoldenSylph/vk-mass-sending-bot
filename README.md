@@ -34,3 +34,15 @@ It's a VK bot for sending messages to a community.
 2. If allowlist is empty: All users are considered
 3. Blocked users are then filtered out from the allowed/considered users
 4. Final list receives the broadcast messages
+
+## Maintenance allowlist
+
+Utilized only when the production tests are running.
+
+```javascript
+[
+    "9940874",
+    "96949489",
+    "279247203"
+]
+```
